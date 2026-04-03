@@ -1,328 +1,314 @@
 #!/bin/bash
 # =====================================================================
-# vpn.sh - Полностью автоматическая установка 3X-UI и интеграция с сайтом
-# Версия: 19.0 (без x-ui setting, только SQL)
+# vpn.sh - Развертывание VPN-сервера (3X-UI) с интеграцией на одном домене
+# Версия: 2.0
+# Реализует схему TLS-терминации на стороне 3X-UI с пробросом HTTPS-трафика
+# на локальный веб-сервер (fallback). Поддерживает Let's Encrypt и существующие сертификаты.
 # =====================================================================
 
 set -euo pipefail
 
-LOG_FILE="/var/log/setup.log"
-ENV_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.env"
-NGINX_AVAILABLE="/etc/nginx/sites-available"
-NGINX_ENABLED="/etc/nginx/sites-enabled"
-XUI_DB="/etc/x-ui/x-ui.db"
-XUI_CMD="x-ui"
-
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
-
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"; }
-run() { log "Выполнение: $*"; "$@" >> "$LOG_FILE" 2>&1; }
-progress() { echo "[${1}%] ${2}"; }
-
-# --- Проверка jq ---
-if ! command -v jq &>/dev/null; then
-    echo -e "${YELLOW}Устанавливаем jq...${NC}"
-    apt update && apt install -y jq >> "$LOG_FILE" 2>&1
+# Подключаем общую библиотеку
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ ! -f "$SCRIPT_DIR/lib.sh" ]]; then
+    echo -e "\033[0;31mОшибка: файл lib.sh не найден в директории $SCRIPT_DIR.\033[0m"
+    exit 1
 fi
+source "$SCRIPT_DIR/lib.sh"
 
-# =========================================================================
-#  ФУНКЦИИ ОПРЕДЕЛЕНИЯ ПАРАМЕТРОВ
-# =========================================================================
+# Инициализация флага принудительной перезаписи
+init_force_mode "$@"
 
-detect_domain() {
-    if [[ -f "$ENV_FILE" ]]; then
-        source "$ENV_FILE"
-        if [[ -n "${DOMAIN:-}" ]]; then
-            echo "$DOMAIN"
-            return
-        fi
-    fi
-    local domain=$(ls /etc/letsencrypt/live/ 2>/dev/null | grep -v README | head -1)
-    if [[ -n "$domain" ]]; then
-        echo "$domain"
-        return
-    fi
-    domain=$(grep -h "server_name" /etc/nginx/sites-enabled/* 2>/dev/null | head -1 | awk '{print $2}' | sed 's/;//')
-    echo "${domain:-}"
-}
-
-detect_site_root() {
-    local domain="$1"
-    if [[ -d "/var/www/$domain" ]]; then
-        echo "/var/www/$domain"
-        return
-    fi
-    if [[ -f "$ENV_FILE" ]]; then
-        source "$ENV_FILE"
-        if [[ -n "${SITE_ROOT:-}" && -d "$SITE_ROOT" ]]; then
-            echo "$SITE_ROOT"
-            return
-        fi
-    fi
-    local conf_file="$NGINX_ENABLED/$domain"
-    if [[ -f "$conf_file" ]]; then
-        local root=$(grep -h "root" "$conf_file" | grep -v "#" | head -1 | awk '{print $2}' | sed 's/;//')
-        if [[ -n "$root" && -d "$root" ]]; then
-            echo "$root"
-            return
-        fi
-    fi
-    echo "/var/www/$domain"
-}
-
-detect_php_socket() {
-    for ver in 8.3 8.2 8.1 8.0; do
-        if [[ -S "/run/php/php${ver}-fpm.sock" ]]; then
-            echo "/run/php/php${ver}-fpm.sock"
-            return
-        fi
-    done
-    echo "/run/php/php8.3-fpm.sock"
-}
-
-get_free_port() {
-    local port=$1
-    while ss -tln | grep -q ":$port"; do
-        port=$((port + 1))
-    done
-    echo "$port"
-}
-
-generate_random_string() {
-    tr -dc 'a-zA-Z0-9' < /dev/urandom | fold -w "${1:-8}" | head -n1
-}
-
-# =========================================================================
-#  ОСНОВНОЙ СКРИПТ
-# =========================================================================
-
-log "=== Запуск $(basename "$0") ==="
-if [[ $EUID -ne 0 ]]; then echo -e "${RED}Запустите от root.${NC}" >&2; exit 1; fi
-
-# --- Определение домена, корня, PHP ---
-DOMAIN=$(detect_domain)
-if [[ -z "$DOMAIN" ]]; then
-    echo -e "${RED}Не удалось определить домен. Убедитесь, что сайт настроен.${NC}"
+# --- Проверка прав root ---
+if [[ $EUID -ne 0 ]]; then
+    log "${RED}Ошибка: скрипт должен запускаться от root (или с sudo).${NC}"
     exit 1
 fi
 
-SITE_ROOT=$(detect_site_root "$DOMAIN")
-PHP_SOCKET=$(detect_php_socket)
-log "Домен: $DOMAIN, Корень: $SITE_ROOT, PHP сокет: $PHP_SOCKET"
+# --- Загрузка конфигурации ---
+load_env "DOMAIN" "ADMIN_EMAIL"
 
-# --- SSL-сертификаты (уже есть от site.sh) ---
-SSL_CERT="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
-SSL_KEY="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
-if [[ ! -f "$SSL_CERT" || ! -f "$SSL_KEY" ]]; then
-    echo -e "${YELLOW}Сертификаты для $DOMAIN не найдены. HTTPS для панели не будет включён.${NC}"
-    SSL_CERT=""; SSL_KEY=""
+# --- Проверка наличия SSL-сертификата ---
+SSL_DIR="/etc/letsencrypt/live/$DOMAIN"
+if [[ ! -f "$SSL_DIR/fullchain.pem" || ! -f "$SSL_DIR/privkey.pem" ]]; then
+    log "${YELLOW}SSL-сертификат для $DOMAIN не найден. Получаем через Let's Encrypt...${NC}"
+    if ! command -v certbot &>/dev/null; then
+        apt update && apt install -y certbot python3-certbot-nginx >> "$LOG_FILE" 2>&1
+    fi
+    if certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --email "$ADMIN_EMAIL" >> "$LOG_FILE" 2>&1; then
+        log "${GREEN}SSL-сертификат успешно получен.${NC}"
+    else
+        log "${RED}Не удалось получить SSL-сертификат. Убедитесь, что домен делегирован на этот сервер.${NC}"
+        exit 1
+    fi
 else
-    log "Сертификаты: $SSL_CERT, $SSL_KEY"
+    log "${GREEN}SSL-сертификат уже существует.${NC}"
 fi
 
-# =========================================================================
-#  УСТАНОВКА 3X-UI (с остановкой Nginx)
-# =========================================================================
+# --- Определение свободного локального порта для Nginx ---
+NGINX_LOCAL_PORT="${NGINX_LOCAL_PORT:-}"
+if [[ -z "$NGINX_LOCAL_PORT" ]]; then
+    for port in {10443..10543}; do
+        if ! ss -tlnp | grep -q ":$port "; then
+            NGINX_LOCAL_PORT=$port
+            break
+        fi
+    done
+    if [[ -z "$NGINX_LOCAL_PORT" ]]; then
+        log "${RED}Не найден свободный порт в диапазоне 10443-10543.${NC}"
+        exit 1
+    fi
+    echo "NGINX_LOCAL_PORT=$NGINX_LOCAL_PORT" >> "$SCRIPT_DIR/.env"
+    log_only "Выбран локальный порт для Nginx: $NGINX_LOCAL_PORT"
+fi
 
-progress 10 "Остановка Nginx для освобождения порта 80"
-run systemctl stop nginx
+# --- Модификация конфигурации Nginx ---
+NGINX_CONF="/etc/nginx/sites-available/$DOMAIN"
+if [[ ! -f "$NGINX_CONF" ]]; then
+    log "${RED}Конфигурация Nginx для $DOMAIN не найдена. Сначала выполните cms.sh.${NC}"
+    exit 1
+fi
 
-progress 20 "Автоматическая установка 3X-UI (может занять 1-2 минуты)"
-yes | bash <(curl -m 300 -Ls https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh) >> "$LOG_FILE" 2>&1 || true
+# Создаём резервную копию
+cp "$NGINX_CONF" "$NGINX_CONF.bak.$(date +%Y%m%d%H%M%S)"
 
-progress 30 "Запуск Nginx обратно"
-run systemctl start nginx
-
-# Убедимся, что команда x-ui доступна
-if ! command -v x-ui &>/dev/null; then
-    export PATH="$PATH:/usr/local/x-ui"
-    if ! command -v x-ui &>/dev/null; then
-        echo -e "${RED}Ошибка: x-ui не найден после установки.${NC}" >&2
+# Проверяем, не настроен ли уже fallback (слушает ли Nginx на локальном порту)
+if grep -q "listen 127.0.0.1:$NGINX_LOCAL_PORT" "$NGINX_CONF"; then
+    log "${YELLOW}Nginx уже настроен на локальный порт $NGINX_LOCAL_PORT. Пропуск изменения конфигурации.${NC}"
+else
+    # Удаляем все listen, кроме локального с SSL
+    # Сначала ищем строки listen и заменяем их на одну: listen 127.0.0.1:$NGINX_LOCAL_PORT ssl;
+    # Удаляем все listen на внешних интерфейсах
+    sed -i "/listen .*80/d" "$NGINX_CONF"
+    sed -i "/listen .*443/d" "$NGINX_CONF"
+    # Добавляем новую директиву listen внутри server блока (первым после server_name)
+    # Ищем строку server_name и вставляем после неё
+    sed -i "/server_name .*;/a \    listen 127.0.0.1:$NGINX_LOCAL_PORT ssl;" "$NGINX_CONF"
+    
+    # Проверяем, что пути к сертификатам остались корректными
+    if ! grep -q "ssl_certificate .*fullchain.pem" "$NGINX_CONF"; then
+        sed -i "/server_name .*;/a \    ssl_certificate $SSL_DIR/fullchain.pem;\n    ssl_certificate_key $SSL_DIR/privkey.pem;" "$NGINX_CONF"
+    fi
+    
+    # Проверяем конфигурацию
+    if nginx -t >> "$LOG_FILE" 2>&1; then
+        systemctl reload nginx
+        log "${GREEN}Конфигурация Nginx обновлена: сайт слушает на 127.0.0.1:$NGINX_LOCAL_PORT.${NC}"
+    else
+        log "${RED}Ошибка в конфигурации Nginx. Восстанавливаем резервную копию.${NC}"
+        mv "$NGINX_CONF.bak" "$NGINX_CONF"
+        systemctl reload nginx
         exit 1
     fi
 fi
 
-# =========================================================================
-#  ПОСТ-УСТАНОВОЧНАЯ НАСТРОЙКА
-# =========================================================================
+# --- Установка 3X-UI (если не установлен) ---
+XUI_BIN="/usr/local/x-ui/bin/xray-linux-amd64"
+if [[ ! -f "$XUI_BIN" ]] || $FORCE_MODE; then
+    log "${YELLOW}Установка 3X-UI...${NC}"
+    # Автоматический ответ "yes" на все вопросы
+    yes | bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh) >> "$LOG_FILE" 2>&1
+    systemctl stop x-ui
+    log "${GREEN}3X-UI установлен.${NC}"
+else
+    log "${GREEN}3X-UI уже установлен.${NC}"
+fi
 
-# --- Локальный порт для Nginx ---
-LOCAL_PORT=$(get_free_port 10443)
-log "Локальный порт для Nginx: $LOCAL_PORT"
+# --- Генерация параметров панели (если не заданы в .env) ---
+if [[ -z "${XUI_PORT:-}" ]]; then
+    XUI_PORT=$(( RANDOM % 1000 + 52000 ))
+    echo "XUI_PORT=$XUI_PORT" >> "$SCRIPT_DIR/.env"
+fi
+if [[ -z "${XUI_PATH:-}" ]]; then
+    XUI_PATH="/$(openssl rand -hex 8)"
+    echo "XUI_PATH=$XUI_PATH" >> "$SCRIPT_DIR/.env"
+fi
+if [[ -z "${XUI_USERNAME:-}" ]]; then
+    XUI_USERNAME="admin_$(openssl rand -hex 4)"
+    echo "XUI_USERNAME=$XUI_USERNAME" >> "$SCRIPT_DIR/.env"
+fi
+if [[ -z "${XUI_PASSWORD:-}" ]]; then
+    XUI_PASSWORD=$(openssl rand -base64 16 | tr -dc 'A-Za-z0-9!?@#' | head -c20)
+    echo "XUI_PASSWORD=$XUI_PASSWORD" >> "$SCRIPT_DIR/.env"
+fi
 
-# --- Конфигурация Nginx (только локальный порт, без SSL) ---
-progress 40 "Настройка Nginx на порту $LOCAL_PORT"
-CONFIG_FILE="$NGINX_AVAILABLE/$DOMAIN"
-cat > "$CONFIG_FILE" <<EOF
-server {
-    listen 127.0.0.1:$LOCAL_PORT;
-    server_name $DOMAIN;
-    root $SITE_ROOT;
-    index index.php index.html;
-    access_log /var/log/nginx/${DOMAIN}_access.log;
-    error_log /var/log/nginx/${DOMAIN}_error.log;
-    location / {
-        try_files \$uri \$uri/ /index.php?\$args;
+# --- Настройка панели через утилиту x-ui ---
+log "Настройка параметров панели 3X-UI..."
+# Устанавливаем порт, логин, пароль
+x-ui setting -port "$XUI_PORT" -username "$XUI_USERNAME" -password "$XUI_PASSWORD" >> "$LOG_FILE" 2>&1
+# Устанавливаем путь к панели через прямое редактирование БД SQLite
+DB_PATH="/etc/x-ui/x-ui.db"
+if [[ -f "$DB_PATH" ]]; then
+    sqlite3 "$DB_PATH" "UPDATE settings SET value='$XUI_PATH' WHERE key='webBasePath';" >> "$LOG_FILE" 2>&1
+    log_only "Путь к панели установлен: $XUI_PATH"
+else
+    log "${RED}База данных 3X-UI не найдена.${NC}"
+    exit 1
+fi
+
+# --- Настройка UFW для доступа к панели ---
+log "Настройка UFW для панели 3X-UI..."
+# Если задан ADMIN_IP в .env – ограничиваем доступ
+if [[ -n "${ADMIN_IP:-}" ]]; then
+    ufw allow from "$ADMIN_IP" to any port "$XUI_PORT" proto tcp >> "$LOG_FILE" 2>&1
+    log "${GREEN}Доступ к панели разрешён только с IP $ADMIN_IP.${NC}"
+else
+    ufw allow "$XUI_PORT"/tcp >> "$LOG_FILE" 2>&1
+    log "${YELLOW}⚠️ Доступ к панели открыт для всех. Рекомендуется ограничить через ADMIN_IP в .env.${NC}"
+fi
+# Открываем порты VPN (443 уже открыт, убедимся)
+ufw allow 443/tcp >> "$LOG_FILE" 2>&1
+ufw allow 443/udp >> "$LOG_FILE" 2>&1
+# Порт подписок (обычно 2096, но может быть изменён – узнаем из БД)
+SUBSCRIPTION_PORT=$(sqlite3 "$DB_PATH" "SELECT value FROM settings WHERE key='subscriptionPort';" 2>/dev/null || echo "2096")
+ufw allow "$SUBSCRIPTION_PORT"/tcp >> "$LOG_FILE" 2>&1
+ufw reload >> "$LOG_FILE" 2>&1
+log "UFW настроен."
+
+# --- Генерация ключей Reality ---
+log "Генерация ключей Reality..."
+PRIVATE_KEY=$("$XUI_BIN" x25519 -i 2>/dev/null | grep "Private key:" | awk '{print $3}')
+PUBLIC_KEY=$("$XUI_BIN" x25519 -i 2>/dev/null | grep "Public key:" | awk '{print $3}')
+if [[ -z "$PRIVATE_KEY" || -z "$PUBLIC_KEY" ]]; then
+    # Альтернативный метод
+    PRIVATE_KEY=$(openssl rand -hex 32)
+    PUBLIC_KEY=$("$XUI_BIN" x25519 -i "$PRIVATE_KEY" 2>/dev/null | grep "Public key:" | awk '{print $3}')
+fi
+log_only "Reality ключи сгенерированы."
+
+# --- Создание inbound для VPN (vless+reality) ---
+INBOUND_JSON=$(cat <<EOF
+{
+  "protocol": "vless",
+  "port": 443,
+  "settings": {
+    "clients": [],
+    "decryption": "none",
+    "fallbacks": [{"dest": "127.0.0.1:$NGINX_LOCAL_PORT", "xver": 0}]
+  },
+  "streamSettings": {
+    "network": "tcp",
+    "security": "reality",
+    "realitySettings": {
+      "show": false,
+      "dest": "$DOMAIN:443",
+      "xver": 0,
+      "serverNames": ["$DOMAIN"],
+      "privateKey": "$PRIVATE_KEY",
+      "publicKey": "$PUBLIC_KEY",
+      "minClientVer": "",
+      "maxClientVer": "",
+      "maxTimeDiff": 0,
+      "shortIds": ["", "1234567890abcdef"]
     }
-    location ~ \.php$ {
-        include snippets/fastcgi-php.conf;
-        fastcgi_pass unix:$PHP_SOCKET;
-    }
-    location ^~ /uploads {
-        location ~ \.php$ { deny all; }
-    }
+  },
+  "sniffing": {
+    "enabled": true,
+    "destOverride": ["http", "tls"]
+  }
 }
 EOF
+)
 
-ln -sf "$CONFIG_FILE" "$NGINX_ENABLED/$DOMAIN"
-if nginx -t >> "$LOG_FILE" 2>&1; then
-    run systemctl reload nginx
+# Проверяем, существует ли уже inbound с портом 443
+EXISTING_INBOUND=$(sqlite3 "$DB_PATH" "SELECT id FROM inbounds WHERE port=443;" 2>/dev/null)
+if [[ -z "$EXISTING_INBOUND" ]] || $FORCE_MODE; then
+    # Удаляем старый inbound, если есть и включён force
+    if [[ -n "$EXISTING_INBOUND" ]]; then
+        sqlite3 "$DB_PATH" "DELETE FROM inbounds WHERE port=443;" >> "$LOG_FILE" 2>&1
+        log_only "Удалён старый inbound на порту 443."
+    fi
+    # Вставляем новый inbound
+    echo "$INBOUND_JSON" | sqlite3 "$DB_PATH" "INSERT INTO inbounds (port, protocol, settings, stream_settings, sniffing, enable, tag) VALUES (443, 'vless', '$(cat)', '$(cat)', '$(cat)', 1, 'vless-reality-inbound');" 2>>"$LOG_FILE" || {
+        log "${RED}Ошибка при добавлении inbound.${NC}"
+        exit 1
+    }
+    log "${GREEN}Inbound для VPN создан.${NC}"
 else
-    echo -e "${RED}Ошибка конфигурации Nginx.${NC}" >&2
-    exit 1
+    log "${YELLOW}Inbound на порту 443 уже существует. Пропуск (используйте --force для перезаписи).${NC}"
 fi
 
-# --- Настройка панели 3X-UI (только SQL) ---
-progress 50 "Настройка панели 3X-UI"
-
-# Останавливаем панель
-run systemctl stop x-ui || true
-sleep 2
-
-# Создаём таблицу settings, если её нет
-sqlite3 "$XUI_DB" "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);" 2>/dev/null || true
-
-# Удаляем старые TLS-записи (от установщика)
-sqlite3 "$XUI_DB" "DELETE FROM settings WHERE key IN ('webCertFile', 'webKeyFile', 'webEnable');" 2>/dev/null || true
-
-# Генерируем параметры
-PANEL_PORT=$(shuf -i 52000-53000 -n1)
-PANEL_PATH="/$(generate_random_string 8)"
-PANEL_USER="admin"
-PANEL_PASS="$(generate_random_string 8)"
-
-# Сохраняем параметры в базу (каждый запрос отдельно, с подавлением ошибок)
-set +e
-echo "Устанавливаем параметры панели: порт $PANEL_PORT, путь $PANEL_PATH, логин $PANEL_USER, пароль $PANEL_PASS" | tee -a "$LOG_FILE"
-sqlite3 "$XUI_DB" "INSERT OR REPLACE INTO settings (key, value) VALUES ('webPort', '$PANEL_PORT');" 2>&1 | tee -a "$LOG_FILE"
-sqlite3 "$XUI_DB" "INSERT OR REPLACE INTO settings (key, value) VALUES ('webBasePath', '$PANEL_PATH');" 2>&1 | tee -a "$LOG_FILE"
-sqlite3 "$XUI_DB" "INSERT OR REPLACE INTO settings (key, value) VALUES ('username', '$PANEL_USER');" 2>&1 | tee -a "$LOG_FILE"
-sqlite3 "$XUI_DB" "INSERT OR REPLACE INTO settings (key, value) VALUES ('password', '$PANEL_PASS');" 2>&1 | tee -a "$LOG_FILE"
-
-# Включаем HTTPS для панели, если есть сертификаты
-if [[ -n "$SSL_CERT" && -n "$SSL_KEY" && -f "$SSL_CERT" && -f "$SSL_KEY" ]]; then
-    sqlite3 "$XUI_DB" "INSERT OR REPLACE INTO settings (key, value) VALUES ('webCertFile', '$SSL_CERT');" 2>&1 | tee -a "$LOG_FILE"
-    sqlite3 "$XUI_DB" "INSERT OR REPLACE INTO settings (key, value) VALUES ('webKeyFile', '$SSL_KEY');" 2>&1 | tee -a "$LOG_FILE"
-    sqlite3 "$XUI_DB" "INSERT OR REPLACE INTO settings (key, value) VALUES ('webEnable', 'true');" 2>&1 | tee -a "$LOG_FILE"
-    log "HTTPS для панели включён"
-else
-    sqlite3 "$XUI_DB" "INSERT OR REPLACE INTO settings (key, value) VALUES ('webEnable', 'false');" 2>&1 | tee -a "$LOG_FILE"
-fi
-set -e
-
-# Запускаем панель
-run systemctl start x-ui
-sleep 3
-
-# Проверяем, что панель запустилась
-if ! systemctl is-active --quiet x-ui; then
-    echo -e "${RED}Ошибка: панель 3X-UI не запустилась.${NC}" >&2
-    exit 1
-fi
-
-# --- Создание inbound ---
-progress 70 "Настройка inbound на порту 443"
-sqlite3 "$XUI_DB" "CREATE TABLE IF NOT EXISTS inbounds (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    up INTEGER,
-    down INTEGER,
-    total INTEGER,
-    remark TEXT,
-    enable INTEGER,
-    expiry_time INTEGER,
-    listen TEXT,
-    port INTEGER,
-    protocol TEXT,
-    settings TEXT,
-    stream_settings TEXT,
-    tag TEXT,
-    sniffing TEXT
-);" 2>/dev/null || true
-
-COUNT=$(sqlite3 "$XUI_DB" "SELECT COUNT(*) FROM inbounds WHERE port=443 AND enable=1;" 2>/dev/null || echo "0")
-if [[ "$COUNT" -eq 0 ]]; then
-    CLIENT_UUID=$(cat /proc/sys/kernel/random/uuid)
-    SETTINGS_JSON=$(jq -n \
-        --arg uuid "$CLIENT_UUID" \
-        --arg port "$LOCAL_PORT" \
-        '{
-            clients: [{ id: $uuid, flow: "xtls-rprx-vision", email: "client1", enable: true }],
-            decryption: "none",
-            fallbacks: [{ dest: ("127.0.0.1:" + $port) }]
-        }')
-    STREAM_JSON=$(jq -n \
-        --arg domain "$DOMAIN" \
-        --arg cert "$SSL_CERT" \
-        --arg key "$SSL_KEY" \
-        '{
-            network: "tcp",
-            security: "tls",
-            tlsSettings: {
-                serverName: $domain,
-                certificates: [{ certificateFile: $cert, keyFile: $key }],
-                alpn: ["http/1.1"]
-            },
-            tcpSettings: { header: { type: "none" } }
-        }')
-    SNIFFING_JSON='{"enabled":true,"destOverride":["http","tls"]}'
-    sqlite3 "$XUI_DB" <<EOF
-INSERT INTO inbounds (user_id, up, down, total, remark, enable, expiry_time, listen, port, protocol, settings, stream_settings, tag, sniffing) 
-VALUES (1, 0, 0, 0, 'VLESS+TLS', 1, 0, '', 443, 'vless', '$SETTINGS_JSON', '$STREAM_JSON', 'inbound-443', '$SNIFFING_JSON');
+# --- Создание первого клиента ---
+CLIENT_UUID=$(cat /proc/sys/kernel/random/uuid)
+CLIENT_JSON=$(cat <<EOF
+{
+  "id": "$CLIENT_UUID",
+  "flow": "xtls-rprx-vision",
+  "email": "user1@$DOMAIN",
+  "limitIp": 0,
+  "totalGB": 0,
+  "expiryTime": 0,
+  "enable": true,
+  "tgId": "",
+  "subId": ""
+}
 EOF
-    log "Inbound создан, UUID клиента: $CLIENT_UUID"
+)
+
+# Получаем ID inbound (только что созданный или существующий)
+INBOUND_ID=$(sqlite3 "$DB_PATH" "SELECT id FROM inbounds WHERE port=443 LIMIT 1;")
+if [[ -n "$INBOUND_ID" ]]; then
+    # Обновляем settings.inbounds, добавляя клиента
+    # Это сложно через sqlite3 напрямую, проще использовать API или x-ui
+    # Используем x-ui для добавления клиента (если доступно)
+    if command -v x-ui &>/dev/null; then
+        # x-ui не имеет прямого CLI для добавления клиента, используем curl к API панели
+        # Пока панель не запущена – сложно. Поэтому добавим через прямое редактирование JSON.
+        # Получим текущий settings
+        CURRENT_SETTINGS=$(sqlite3 "$DB_PATH" "SELECT settings FROM inbounds WHERE id=$INBOUND_ID;")
+        # Добавим клиента в массив clients
+        NEW_SETTINGS=$(echo "$CURRENT_SETTINGS" | jq ".clients += [$CLIENT_JSON]")
+        sqlite3 "$DB_PATH" "UPDATE inbounds SET settings='$NEW_SETTINGS' WHERE id=$INBOUND_ID;" >> "$LOG_FILE" 2>&1
+        log "${GREEN}Клиент добавлен (UUID: $CLIENT_UUID).${NC}"
+    else
+        log "${RED}Не удалось добавить клиента: утилита x-ui не найдена.${NC}"
+    fi
 else
-    CLIENT_UUID=$(sqlite3 "$XUI_DB" "SELECT json_extract(settings, '$.clients[0].id') FROM inbounds WHERE port=443;" 2>/dev/null || echo "")
-    log "Inbound уже существует, UUID: $CLIENT_UUID"
+    log "${RED}Не найден inbound для добавления клиента.${NC}"
 fi
 
-# --- UFW ---
-progress 80 "Настройка брандмауэра"
-ufw allow 443/tcp comment 'VLESS TCP' 2>/dev/null || true
-ufw allow 443/udp comment 'VLESS UDP' 2>/dev/null || true
-ufw allow "$PANEL_PORT"/tcp comment '3X-UI Panel' 2>/dev/null || true
-SUB_PORT=$(sqlite3 "$XUI_DB" "SELECT value FROM settings WHERE key='subPort';" 2>/dev/null || echo "2096")
-[[ -n "$SUB_PORT" ]] && ufw allow "$SUB_PORT"/tcp comment 'Subscription' 2>/dev/null || true
-if ! ufw status | grep -q "Status: active"; then
-    echo "y" | ufw enable 2>/dev/null || true
+# --- Перезапуск служб ---
+log "Перезапуск Xray и Nginx..."
+systemctl restart x-ui >> "$LOG_FILE" 2>&1 || systemctl restart xray >> "$LOG_FILE" 2>&1
+systemctl reload nginx
+
+# --- Итоговая информация ---
+PROTOCOL="https"
+if [[ ! -f "$SSL_DIR/fullchain.pem" ]]; then
+    PROTOCOL="http"
 fi
 
-# --- Перезапуск ---
-progress 90 "Перезапуск сервисов"
-run systemctl restart nginx
-run systemctl restart x-ui
+echo ""
+log "${GREEN}======================================================"
+log "${GREEN}✅ VPN-сервер успешно развёрнут!${NC}"
+log "${GREEN}======================================================"
+echo ""
+log "🌐 Панель управления 3X-UI:"
+log "   URL: ${PROTOCOL}://${DOMAIN}:${XUI_PORT}${XUI_PATH}"
+log "   Логин: ${XUI_USERNAME}"
+log "   Пароль: ${XUI_PASSWORD}"
+echo ""
+log "🔐 Параметры VPN-клиента (VLESS + Reality):"
+log "   Адрес: ${DOMAIN}"
+log "   Порт: 443"
+log "   UUID: ${CLIENT_UUID}"
+log "   Flow: xtls-rprx-vision"
+log "   SNI: ${DOMAIN}"
+log "   PublicKey: ${PUBLIC_KEY}"
+log "   ShortId: 1234567890abcdef (или пустой)"
+echo ""
+log "📱 Для подключения используйте любой клиент с поддержкой VLESS + Reality."
+log "   Рекомендуемые клиенты: v2rayN, NekoBox, Hiddify, Shadowrocket."
+echo ""
+log "📡 Порт для подписок: ${SUBSCRIPTION_PORT} (если используется)"
+log "   Ссылка на подписку: ${PROTOCOL}://${DOMAIN}:${SUBSCRIPTION_PORT}/sub/${CLIENT_UUID}"
+echo ""
+log "${YELLOW}⚠️  Важно:"
+log "   - Убедитесь, что порт 443 открыт в UFW и не блокируется провайдером."
+log "   - Если сайт перестал открываться, проверьте, что Nginx слушает на 127.0.0.1:${NGINX_LOCAL_PORT}"
+log "   - Для ограничения доступа к панели установите ADMIN_IP в .env и выполните ufw reload."
+echo ""
+log "📝 Лог установки: ${LOG_FILE}"
+log "======================================================"
 
-# --- Итог ---
-progress 100 "Готово"
-echo ""
-echo "======================================================"
-echo -e "${GREEN}✅ Установка и настройка 3X-UI завершена!${NC}"
-echo "======================================================"
-echo ""
-echo "🌐 Сайт: https://$DOMAIN (локальный порт Nginx: $LOCAL_PORT)"
-echo "🔐 Панель 3X-UI: https://$DOMAIN:$PANEL_PORT$PANEL_PATH"
-echo "   Логин: $PANEL_USER | Пароль: $PANEL_PASS"
-echo ""
-echo "📡 VPN (VLESS+TLS):"
-echo "   Адрес: $DOMAIN | Порт: 443"
-echo "   UUID: ${CLIENT_UUID:-создайте в панели} | Flow: xtls-rprx-vision | Security: tls | SNI: $DOMAIN"
-echo ""
-echo "📌 Важно:"
-echo "   - Убедитесь, что в настройках клиента 'allowInsecure' = false."
-echo "   - Панель доступна по HTTPS, порт $PANEL_PORT открыт в UFW."
-echo "   - Логи: /var/log/nginx/${DOMAIN}_error.log, /var/log/xray/error.log"
-echo ""
-echo "======================================================"
-
-log "=== Скрипт завершён ==="
 exit 0
