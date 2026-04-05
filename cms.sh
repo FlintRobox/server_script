@@ -96,28 +96,52 @@ if [[ "$SSL_TYPE" == "existing" ]]; then
             if [[ "$use_found" =~ ^[YyДд]$ ]]; then
                 SSL_CERT_DIR="$FOUND_DIR"
             else
-                ask_var SSL_CERT_DIR "Введите путь к папке с файлами сертификатов (.key, .crt/.cer, ca.crt)" "" ""
+                # Ручной ввод с проверкой существования
+                while true; do
+                    ask_var SSL_CERT_DIR "Введите путь к папке с файлами сертификатов" "" ""
+                    if [[ -d "$SSL_CERT_DIR" ]]; then
+                        break
+                    else
+                        log "${RED}Папка $SSL_CERT_DIR не существует. Попробуйте снова.${NC}"
+                    fi
+                done
             fi
         else
-            ask_var SSL_CERT_DIR "Введите путь к папке с файлами сертификатов (.key, .crt/.cer, ca.crt)" "" ""
+            # Если не найдено, запрашиваем вручную с проверкой
+            while true; do
+                ask_var SSL_CERT_DIR "Введите путь к папке с файлами сертификатов" "" ""
+                if [[ -d "$SSL_CERT_DIR" ]]; then
+                    break
+                else
+                    log "${RED}Папка $SSL_CERT_DIR не существует. Попробуйте снова.${NC}"
+                fi
+            done
         fi
         echo "SSL_CERT_DIR=\"$SSL_CERT_DIR\"" >> "$SCRIPT_DIR/.env"
+    else
+        # Если SSL_CERT_DIR уже задан в .env, проверяем существование
+        if [[ ! -d "$SSL_CERT_DIR" ]]; then
+            log "${RED}Папка $SSL_CERT_DIR, указанная в .env, не существует.${NC}"
+            while true; do
+                ask_var SSL_CERT_DIR "Введите путь к папке с сертификатами" "" ""
+                if [[ -d "$SSL_CERT_DIR" ]]; then
+                    break
+                else
+                    log "${RED}Папка $SSL_CERT_DIR не существует. Попробуйте снова.${NC}"
+                fi
+            done
+            sed -i "/^SSL_CERT_DIR=/d" "$SCRIPT_DIR/.env"
+            echo "SSL_CERT_DIR=\"$SSL_CERT_DIR\"" >> "$SCRIPT_DIR/.env"
+        fi
     fi
-    
-    # Проверяем существование папки и наличие файлов
-    if [[ ! -d "$SSL_CERT_DIR" ]]; then
-        log "${RED}Папка $SSL_CERT_DIR не существует.${NC}"
-        exit 1
-    fi
-    
-    # Поиск файлов с проверкой существования папки
+
+    # Проверяем наличие файлов в выбранной папке
     KEY_FILE=$(find "$SSL_CERT_DIR" -maxdepth 1 -type f \( -name "*.key" -o -name "*.pem" \) | grep -i "key" | head -n1)
     CERT_FILE=$(find "$SSL_CERT_DIR" -maxdepth 1 -type f \( -name "*.crt" -o -name "*.cer" -o -name "*.pem" \) | grep -v "ca" | grep -v "key" | head -n1)
     CA_FILE=$(find "$SSL_CERT_DIR" -maxdepth 1 -type f \( -name "ca.crt" -o -name "ca.cer" -o -name "*.ca" \) | head -n1)
     
     if [[ -z "$KEY_FILE" || -z "$CERT_FILE" ]]; then
         log "${RED}Не удалось найти ключ или сертификат в $SSL_CERT_DIR${NC}"
-        log "Убедитесь, что в папке есть файл с расширением .key и файл .crt/.cer"
         exit 1
     fi
     
@@ -130,7 +154,7 @@ if [[ "$SSL_TYPE" == "existing" ]]; then
     SSL_TARGET="/etc/letsencrypt/live/$DOMAIN"
     mkdir -p "$SSL_TARGET"
     
-    # Создаём fullchain.pem (сертификат + CA)
+    # Создаём fullchain.pem
     if [[ -n "$CA_FILE" ]]; then
         cat "$CERT_FILE" "$CA_FILE" > "$SSL_TARGET/fullchain.pem"
     else
