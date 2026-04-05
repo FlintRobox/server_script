@@ -454,7 +454,9 @@ return [
     'tracker_added' => 'Трекер успешно добавлен в выбранные файлы',
     'tracker_removed' => 'Трекер удалён из выбранных файлов',
     'manual_instruction' => 'Ручная установка',
-    'manual_text' => 'Если автоматическая вставка не сработала, добавьте вручную перед закрывающим тегом &lt;/body&gt; следующий код:',
+    'manual_text_php' => 'Скопируйте этот код и вставьте в начало каждого PHP-файла (после &lt;?php), для которого нужен сбор статистики:',
+    'manual_text_html' => 'Скопируйте этот код и вставьте перед закрывающим тегом &lt;/body&gt; в HTML-файлах:',
+    'manual_note' => 'Примечание: Файл /js/tracker.js уже создан системой. Убедитесь, что он доступен по указанному пути.',
 ];
 RUEOF
 
@@ -558,7 +560,9 @@ return [
     'tracker_added' => 'Tracker successfully added to selected files',
     'tracker_removed' => 'Tracker removed from selected files',
     'manual_instruction' => 'Manual installation',
-    'manual_text' => 'If automatic insertion failed, manually add the following code before the closing &lt;/body&gt; tag:',
+    'manual_text_php' => 'Copy this code and paste it at the beginning of each PHP file (after &lt;?php) that needs statistics:',
+    'manual_text_html' => 'Copy this code and paste it before the closing &lt;/body&gt; tag in HTML files:',
+    'manual_note' => 'Note: The file /js/tracker.js has already been created by the system. Make sure it is accessible at the specified path.',
 ];
 ENEOF
 log_only "Языковые файлы созданы."
@@ -848,7 +852,7 @@ cat > "$ADMIN_DIR/file-picker.html" <<'PICKER'
 <!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><title>Выбор файла</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><style>.file-item{cursor:pointer}.file-item:hover{background:#f0f0f0}.thumbnail{width:100px;height:auto;max-height:100px;object-fit:cover;margin-right:15px}</style></head><body><div class="container"><h2>Выберите файл</h2><div id="file-list" class="list-group"><div class="text-center"><div class="spinner-border"></div></div></div></div><script>function escapeHtml(str){return str.replace(/[&<>]/g,function(m){if(m==="&") return "&amp;"; if(m==="<") return "&lt;"; if(m===">") return "&gt;"; return m;});}fetch("/admin/file-list.php").then(r=>r.json()).then(files=>{const c=document.getElementById("file-list");c.innerHTML="";if(files.length===0){c.innerHTML="<div class=\"alert alert-info\">Нет загруженных файлов</div>";return;}files.forEach(f=>{const d=document.createElement("div");d.className="list-group-item file-item";d.innerHTML=`<div class="row align-items-center"><div class="col-auto"><img src="${escapeHtml(f.path)}" class="thumbnail" onerror="this.style.display='none'"></div><div class="col"><strong>${escapeHtml(f.original_name)}</strong><br><small>${escapeHtml(f.type)} | ${(f.size/1024).toFixed(2)} KB</small><br><small>Загружен: ${escapeHtml(f.uploaded_at)}</small></div></div>`;d.addEventListener("click",()=>{window.parent.postMessage({mceAction:"FileSelected",url:f.path,title:f.original_name},"*");window.close();});c.appendChild(d);});}).catch(e=>{console.error(e);document.getElementById("file-list").innerHTML="<div class=\"alert alert-danger\">Ошибка</div>";});</script></body></html>
 PICKER
 
-# 6.24 analytics.php (исправленная версия)
+# 6.24 analytics.php
 create_php_file "$ADMIN_DIR/analytics.php" <<'ANALYTICS'
 <?php
 require_once "includes/auth.php";
@@ -952,23 +956,51 @@ foreach (glob($root_dir . "*") as $item) {
                     <h1 class="h2"><?= $pageTitle ?></h1>
                 </div>
                 <?= $message ?>
-                <form method="post">
-                    <div class="mb-3">
-                        <label class="form-label"><?= __("select_files") ?></label>
-                        <select class="form-select" name="files[]" multiple size="10">
-                            <?php foreach ($files_list as $f): ?>
-                                <option value="<?= htmlspecialchars($f) ?>"><?= htmlspecialchars($f) ?></option>
-                            <?php endforeach; ?>
-                        </select>
-                        <div class="form-text">Удерживайте Ctrl для выбора нескольких файлов.</div>
+                
+                <!-- Карточка для автоматической вставки трекера -->
+                <div class="card mb-4">
+                    <div class="card-header">
+                        <i class="bi bi-magic"></i> <?= __("inject_tracker") ?>
                     </div>
-                    <button type="submit" name="action" value="inject" class="btn btn-primary"><i class="bi bi-code-slash"></i> <?= __("inject_tracker") ?></button>
-                    <button type="submit" name="action" value="remove" class="btn btn-danger ms-2"><i class="bi bi-trash"></i> <?= __("remove_tracker") ?></button>
-                </form>
-                <hr>
-                <h4><?= __("manual_instruction") ?></h4>
-                <p><?= __("manual_text") ?></p>
-                <pre class="bg-light p-3">PHP: <?= htmlspecialchars($tracker_php_code) ?><br>HTML: <?= htmlspecialchars($tracker_js_code) ?></pre>
+                    <div class="card-body">
+                        <form method="post">
+                            <div class="mb-3">
+                                <label class="form-label"><?= __("select_files") ?></label>
+                                <select class="form-select" name="files[]" multiple size="10">
+                                    <?php foreach ($files_list as $f): ?>
+                                        <option value="<?= htmlspecialchars($f) ?>"><?= htmlspecialchars($f) ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                                <div class="form-text">Удерживайте Ctrl для выбора нескольких файлов.</div>
+                            </div>
+                            <button type="submit" name="action" value="inject" class="btn btn-primary"><i class="bi bi-code-slash"></i> <?= __("inject_tracker") ?></button>
+                            <button type="submit" name="action" value="remove" class="btn btn-danger ms-2"><i class="bi bi-trash"></i> <?= __("remove_tracker") ?></button>
+                        </form>
+                    </div>
+                </div>
+
+                <!-- Карточка для ручной установки PHP трекера -->
+                <div class="card mb-4">
+                    <div class="card-header">
+                        <i class="bi bi-filetype-php"></i> PHP – <?= __("manual_instruction") ?>
+                    </div>
+                    <div class="card-body">
+                        <p><?= __("manual_text_php") ?></p>
+                        <pre class="bg-light p-3 border rounded"><code><?= htmlspecialchars($tracker_php_code) ?></code></pre>
+                    </div>
+                </div>
+
+                <!-- Карточка для ручной установки HTML/JS трекера -->
+                <div class="card">
+                    <div class="card-header">
+                        <i class="bi bi-filetype-html"></i> HTML/JS – <?= __("manual_instruction") ?>
+                    </div>
+                    <div class="card-body">
+                        <p><?= __("manual_text_html") ?></p>
+                        <pre class="bg-light p-3 border rounded"><code><?= htmlspecialchars($tracker_js_code) ?></code></pre>
+                        <p class="mt-2"><small><?= __("manual_note") ?></small></p>
+                    </div>
+                </div>
             </main>
         </div>
     </div>
