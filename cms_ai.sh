@@ -357,7 +357,9 @@ log_only "ai_history.php создан."
 # ----------------------------------------------------------------------
 next_step "Создание ai_api.php для AJAX-запросов из редактора"
 create_php_file "$ADMIN_DIR/ai_api.php" '<?php
-require_once __DIR__ . "/includes/auth.php";
+require_once __DIR__ . "/../config.php";
+require_once "includes/functions.php";
+require_once "includes/auth.php";
 requireLogin();
 header("Content-Type: application/json");
 

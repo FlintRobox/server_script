@@ -834,7 +834,7 @@ next_step "Настройка cron для метрик"
 CRON_SCRIPT="/usr/local/bin/collect_server_stats.sh"
 cat > "$CRON_SCRIPT" <<EOF
 #!/bin/bash
-source "$SCRIPT_DIR/.env"
+source "${SCRIPT_DIR}/.env"
 load=\$(awk '{print \$1}' /proc/loadavg)
 mem_total=\$(grep MemTotal /proc/meminfo | awk '{print \$2}')
 mem_avail=\$(grep MemAvailable /proc/meminfo | awk '{print \$2}')

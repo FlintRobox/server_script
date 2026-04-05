@@ -256,6 +256,13 @@ if [[ -n "$INBOUND_ID" ]]; then
         # Пока панель не запущена – сложно. Поэтому добавим через прямое редактирование JSON.
         # Получим текущий settings
         CURRENT_SETTINGS=$(sqlite3 "$DB_PATH" "SELECT settings FROM inbounds WHERE id=$INBOUND_ID;")
+
+        # Убедимся, что jq установлен
+        if ! command -v jq &>/dev/null; then
+            log "${YELLOW}Установка jq...${NC}"
+            apt update && apt install -y jq >> "$LOG_FILE" 2>&1
+        fi
+
         # Добавим клиента в массив clients
         NEW_SETTINGS=$(echo "$CURRENT_SETTINGS" | jq ".clients += [$CLIENT_JSON]")
         sqlite3 "$DB_PATH" "UPDATE inbounds SET settings='$NEW_SETTINGS' WHERE id=$INBOUND_ID;" >> "$LOG_FILE" 2>&1
