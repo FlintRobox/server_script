@@ -511,10 +511,23 @@ next_step "Обновление языковых файлов"
 for lang in ru en; do
     LOCALE_FILE="$ADMIN_DIR/locale/$lang.php"
     if [[ -f "$LOCALE_FILE" ]]; then
-        # Проверяем наличие ключей
         if ! grep -q "ai_generator" "$LOCALE_FILE"; then
-            # Добавляем недостающие ключи в конец массива
-            sed -i '/^];$/i \ \ \ \ "ai_generator" => "'$([ "$lang" = "ru" ] && echo "Генератор AI" || echo "AI Generator")'",\n    "ai_history" => "'$([ "$lang" = "ru" ] && echo "История AI" || echo "AI History")'",' "$LOCALE_FILE"
+            # Создаём временный файл
+            TMP_FILE=$(mktemp)
+            # Копируем содержимое до последней строки "];"
+            sed '$d' "$LOCALE_FILE" > "$TMP_FILE"
+            # Добавляем новые ключи
+            if [[ "$lang" == "ru" ]]; then
+                echo '    "ai_generator" => "Генератор AI",' >> "$TMP_FILE"
+                echo '    "ai_history" => "История AI",' >> "$TMP_FILE"
+            else
+                echo '    "ai_generator" => "AI Generator",' >> "$TMP_FILE"
+                echo '    "ai_history" => "AI History",' >> "$TMP_FILE"
+            fi
+            # Добавляем закрывающую строку
+            echo '];' >> "$TMP_FILE"
+            # Заменяем оригинальный файл
+            mv "$TMP_FILE" "$LOCALE_FILE"
             log_only "Добавлены языковые ключи для AI в $lang.php"
         fi
     fi
