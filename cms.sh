@@ -1,7 +1,7 @@
 #!/bin/bash
 # =====================================================================
 # cms.sh - Полная установка CMS и настройка сайта
-# Версия: 5.0 (все файлы админки, проверка index.php/index.html)
+# Версия: 6.0 
 # =====================================================================
 
 set -euo pipefail
@@ -556,12 +556,55 @@ ENEOF
 log_only "Языковые файлы созданы."
 
 # ----------------------------------------------------------------------
-# 6. Создание всех файлов админ-панели (30+ файлов)
+# 6. Создание всех файлов административной панели
 # ----------------------------------------------------------------------
 next_step "Создание файлов админ-панели"
 
-# 6.1 functions.php (уже создан)
-# 6.2 auth.php (уже создан)
+# 6.1 functions.php
+create_php_file "$ADMIN_DIR/includes/functions.php" <<'FUNCS'
+<?php
+function getSetting($key, $default = "") {
+    global $pdo;
+    static $settings = null;
+    if ($settings === null) {
+        $stmt = $pdo->query("SELECT `key`, `value` FROM settings");
+        $settings = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
+    }
+    return $settings[$key] ?? $default;
+}
+function setLanguage($lang) { $_SESSION["lang"] = $lang; }
+function currentLanguage() { return $_SESSION["lang"] ?? getSetting("admin_lang", "ru"); }
+function __($key) {
+    static $translations = null;
+    $lang = currentLanguage();
+    if ($translations === null) {
+        $file = __DIR__ . "/../locale/{$lang}.php";
+        if (file_exists($file)) $translations = include $file;
+        else $translations = include __DIR__ . "/../locale/ru.php";
+    }
+    return $translations[$key] ?? $key;
+}
+FUNCS
+
+# 6.2 auth.php
+create_php_file "$ADMIN_DIR/includes/auth.php" <<'AUTH'
+<?php
+session_start();
+require_once __DIR__ . "/../../config.php";
+require_once __DIR__ . "/functions.php";
+function isLoggedIn() { return isset($_SESSION["user_id"]); }
+function requireLogin() { if (!isLoggedIn()) { header("Location: /admin/login.php"); exit; } }
+function isAdmin() { return isset($_SESSION["role"]) && $_SESSION["role"] === "admin"; }
+function requireAdmin() { requireLogin(); if (!isAdmin()) die("Access denied"); }
+function currentUser() {
+    global $pdo;
+    if (!isset($_SESSION["user_id"])) return null;
+    $stmt = $pdo->prepare("SELECT * FROM users WHERE id = ?");
+    $stmt->execute([$_SESSION["user_id"]]);
+    return $stmt->fetch(PDO::FETCH_ASSOC);
+}
+AUTH
+
 # 6.3 login.php
 create_php_file "$ADMIN_DIR/login.php" <<'LOGIN'
 <?php
@@ -606,7 +649,7 @@ SIDEBAR
 # 6.7 index.php (дашборд)
 create_php_file "$ADMIN_DIR/index.php" <<'DASHBOARD'
 <?php require_once "includes/auth.php"; requireLogin(); $site_name = getSetting("site_name", SITE_NAME); $pageTitle = __("dashboard"); ?>
-<!DOCTYPE html><html lang="<?= currentLanguage() ?>"><head><meta charset="UTF-8"><title><?= htmlspecialchars($site_name) ?> | <?= $pageTitle ?></title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css"><link rel="stylesheet" href="/admin/css/admin.css"><script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script></head><body class="theme-<?= getSetting("admin_theme", "light") ?>"><?php include "includes/header.php"; ?><div class="container-fluid"><div class="row"><?php include "includes/sidebar.php"; ?><main class="col-md-9 ms-sm-auto col-lg-10 px-md-4"><div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom"><h1 class="h2"><?= $pageTitle ?></h1></div><div class="row"><?php $load = sys_getloadavg(); $cpu_load = $load[0] ?? 0; $meminfo = file_get_contents("/proc/meminfo"); preg_match("/MemTotal:\s+(\d+)/", $meminfo, $matches); $mem_total = $matches[1] ?? 0; preg_match("/MemAvailable:\s+(\d+)/", $meminfo, $matches); $mem_avail = $matches[1] ?? 0; $mem_used_percent = $mem_total ? round(($mem_total - $mem_avail) / $mem_total * 100, 1) : 0; $disk_total = disk_total_space("/"); $disk_free = disk_free_space("/"); $disk_used_percent = $disk_total ? round(($disk_total - $disk_free) / $disk_total * 100, 1) : 0; $stmt = $pdo->query("SELECT COUNT(*) FROM pages WHERE status=\"published\""); $pages_count = $stmt->fetchColumn(); ?><div class="col-md-3 mb-3"><div class="card text-white bg-primary"><div class="card-body"><h5 class="card-title"><i class="bi bi-cpu"></i> <?= __("cpu_load") ?></h5><p class="display-6"><?= $cpu_load ?></p></div></div></div><div class="col-md-3 mb-3"><div class="card text-white bg-success"><div class="card-body"><h5 class="card-title"><i class="bi bi-memory"></i> <?= __("ram_usage") ?></h5><p class="display-6"><?= $mem_used_percent ?>%</p></div></div></div><div class="col-md-3 mb-3"><div class="card text-white bg-warning"><div class="card-body"><h5 class="card-title"><i class="bi bi-hdd"></i> <?= __("disk_usage") ?></h5><p class="display-6"><?= $disk_used_percent ?>%</p></div></div></div><div class="col-md-3 mb-3"><div class="card text-white bg-info"><div class="card-body"><h5 class="card-title"><i class="bi bi-file-text"></i> <?= __("pages_count") ?></h5><p class="display-6"><?= $pages_count ?></p></div></div></div></div><div class="row mt-4"><div class="col-md-12"><div class="card"><div class="card-header"><i class="bi bi-bar-chart-line"></i> <?= __("visits_last_7_days") ?></div><div class="card-body"><canvas id="visitsChart" style="height:300px;"></canvas></div></div></div></div><div class="row mt-4"><div class="col-md-12"><div class="card"><div class="card-header"><i class="bi bi-clock-history"></i> <?= __("last_visits") ?></div><div class="card-body"><table class="table table-sm"><thead><tr><th><?= __("time") ?></th><th><?= __("ip") ?></th><th><?= __("page") ?></th><th><?= __("user_agent") ?></th></tr></thead><tbody><?php $stmt = $pdo->query("SELECT * FROM visits ORDER BY created_at DESC LIMIT 5"); while($row = $stmt->fetch(PDO::FETCH_ASSOC)): ?><tr><td><?= htmlspecialchars($row["created_at"]) ?></td><td><?= htmlspecialchars($row["visitor_ip"]) ?></td><td><?= htmlspecialchars($row["page_url"]) ?></td><td><?= htmlspecialchars(substr($row["user_agent"],0,50)) ?>…</td></tr><?php endwhile; ?></tbody></table></div></div></div></div></main></div></div><script>fetch("/admin/api/visits_last_7.php").then(r=>r.json()).then(data=>{new Chart(document.getElementById("visitsChart"),{type:"line",data:{labels:data.labels,datasets:[{label:"<?= __("visits") ?>",data:data.values,borderColor:"rgb(75,192,192)",tension:0.1}]}})});</script><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script></body></html>
+<!DOCTYPE html><html lang="<?= currentLanguage() ?>"><head><meta charset="UTF-8"><title><?= htmlspecialchars($site_name) ?> | <?= $pageTitle ?></title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css"><link rel="stylesheet" href="/admin/css/admin.css"><script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script></head><body class="theme-<?= getSetting("admin_theme", "light") ?>"><?php include "includes/header.php"; ?><div class="container-fluid"><div class="row"><?php include "includes/sidebar.php"; ?><main class="col-md-9 ms-sm-auto col-lg-10 px-md-4"><div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom"><h1 class="h2"><?= $pageTitle ?></h1></div><div class="row"><?php $load = sys_getloadavg(); $cpu_load = $load[0] ?? 0; $meminfo = file_get_contents("/proc/meminfo"); preg_match("/MemTotal:\s+(\d+)/", $meminfo, $matches); $mem_total = $matches[1] ?? 0; preg_match("/MemAvailable:\s+(\d+)/", $meminfo, $matches); $mem_avail = $matches[1] ?? 0; $mem_used_percent = $mem_total ? round(($mem_total - $mem_avail) / $mem_total * 100, 1) : 0; $disk_total = disk_total_space("/"); $disk_free = disk_free_space("/"); $disk_used_percent = $disk_total ? round(($disk_total - $disk_free) / $disk_total * 100, 1) : 0; $stmt = $pdo->query("SELECT COUNT(*) FROM pages WHERE status=\"published\""); $pages_count = $stmt->fetchColumn(); ?><div class="col-md-3 mb-3"><div class="card text-white bg-primary"><div class="card-body"><h5 class="card-title"><i class="bi bi-cpu"></i> <?= __("cpu_load") ?></h5><p class="display-6"><?= $cpu_load ?></p></div></div></div><div class="col-md-3 mb-3"><div class="card text-white bg-success"><div class="card-body"><h5 class="card-title"><i class="bi bi-memory"></i> <?= __("ram_usage") ?></h5><p class="display-6"><?= $mem_used_percent ?>%</p></div></div></div><div class="col-md-3 mb-3"><div class="card text-white bg-warning"><div class="card-body"><h5 class="card-title"><i class="bi bi-hdd"></i> <?= __("disk_usage") ?></h5><p class="display-6"><?= $disk_used_percent ?>%</p></div></div></div><div class="col-md-3 mb-3"><div class="card text-white bg-info"><div class="card-body"><h5 class="card-title"><i class="bi bi-file-text"></i> <?= __("pages_count") ?></h5><p class="display-6"><?= $pages_count ?></p></div></div></div></div><div class="row mt-4"><div class="col-md-12"><div class="card"><div class="card-header"><i class="bi bi-bar-chart-line"></i> <?= __("visits_last_7_days") ?></div><div class="card-body"><canvas id="visitsChart" style="height:300px;"></canvas></div></div></div></div><div class="row mt-4"><div class="col-md-12"><div class="card"><div class="card-header"><i class="bi bi-clock-history"></i> <?= __("last_visits") ?></div><div class="card-body"><table class="table table-sm"><thead><tr><th><?= __("time") ?></th><th><?= __("ip") ?></th><th><?= __("page") ?></th><th><?= __("user_agent") ?></th></tr></thead><tbody><?php $stmt = $pdo->query("SELECT * FROM visits ORDER BY created_at DESC LIMIT 5"); while($row = $stmt->fetch(PDO::FETCH_ASSOC)): ?><tr><td><?= htmlspecialchars($row["created_at"]) ?></td><td><?= htmlspecialchars($row["visitor_ip"]) ?></td><td><?= htmlspecialchars($row["page_url"]) ?></td><td><?= htmlspecialchars(substr($row["user_agent"],0,50)) ?>…</td></tr><?php endwhile; ?></tbody><td></div></div></div></div></main></div></div><script>fetch("/admin/api/visits_last_7.php").then(r=>r.json()).then(data=>{new Chart(document.getElementById("visitsChart"),{type:"line",data:{labels:data.labels,datasets:[{label:"<?= __("visits") ?>",data:data.values,borderColor:"rgb(75,192,192)",tension:0.1}]}})});</script><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script></body></html>
 DASHBOARD
 
 # 6.8 API visits_last_7.php
@@ -622,12 +665,91 @@ STATS
 
 # 6.11 visitors.php
 create_php_file "$ADMIN_DIR/visitors.php" <<'VISITORS'
-<?php require_once "includes/auth.php"; requireLogin(); $site_name = getSetting("site_name", SITE_NAME); $pageTitle = __("visitors"); $date_from = $_GET["date_from"] ?? date("Y-m-d", strtotime("-7 days")); $date_to = $_GET["date_to"] ?? date("Y-m-d"); $ip_filter = $_GET["ip"] ?? ""; $sql = "SELECT * FROM visits WHERE visit_date BETWEEN :from AND :to"; $params = ["from" => $date_from, "to" => $date_to]; if($ip_filter) { $sql .= " AND visitor_ip LIKE :ip"; $params["ip"] = "%$ip_filter%"; } $sql .= " ORDER BY created_at DESC"; $stmt = $pdo->prepare($sql); $stmt->execute($params); $visits = $stmt->fetchAll(PDO::FETCH_ASSOC); $total_visits = count($visits); $unique_ips = count(array_unique(array_column($visits, "visitor_ip"))); ?><!DOCTYPE html><html lang="<?= currentLanguage() ?>"><head><meta charset="UTF-8"><title><?= htmlspecialchars($site_name) ?> | <?= $pageTitle ?></title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css"><link rel="stylesheet" href="/admin/css/admin.css"></head><body class="theme-<?= getSetting("admin_theme", "light") ?>"><?php include "includes/header.php"; ?><div class="container-fluid"><div class="row"><?php include "includes/sidebar.php"; ?><main class="col-md-9 ms-sm-auto col-lg-10 px-md-4"><div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom"><h1 class="h2"><?= $pageTitle ?></h1></div><div class="row mb-3"><div class="col-md-3"><div class="card text-white bg-info"><div class="card-body"><h5 class="card-title"><?= __("total_visits") ?></h5><p class="display-6"><?= $total_visits ?></p></div></div></div><div class="col-md-3"><div class="card text-white bg-success"><div class="card-body"><h5 class="card-title"><?= __("unique_ips") ?></h5><p class="display-6"><?= $unique_ips ?></p></div></div></div></div><form method="get" class="row g-3 mb-4"><div class="col-auto"><label class="form-label"><?= __("from") ?>:</label><input type="date" class="form-control" name="date_from" value="<?= $date_from ?>"></div><div class="col-auto"><label class="form-label"><?= __("to") ?>:</label><input type="date" class="form-control" name="date_to" value="<?= $date_to ?>"></div><div class="col-auto"><label class="form-label">IP</label><input type="text" class="form-control" name="ip" placeholder="часть IP" value="<?= htmlspecialchars($ip_filter) ?>"></div><div class="col-auto align-self-end"><button type="submit" class="btn btn-primary"><?= __("filter") ?></button><a href="visitors.php" class="btn btn-secondary ms-2"><?= __("reset") ?></a></div></form><table class="table table-striped"><thead><tr><th><?= __("time") ?></th><th><?= __("ip") ?></th><th><?= __("page") ?></th><th><?= __("user_agent") ?></th></tr></thead><tbody><?php foreach($visits as $v): ?><tr><td><?= htmlspecialchars($v["created_at"]) ?></td><td><?= htmlspecialchars($v["visitor_ip"]) ?></td><td><?= htmlspecialchars($v["page_url"]) ?></td><td><?= htmlspecialchars($v["user_agent"]) ?></td></tr><?php endforeach; ?></tbody><td></main></div></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script></body></html>
+<?php require_once "includes/auth.php"; requireLogin(); $site_name = getSetting("site_name", SITE_NAME); $pageTitle = __("visitors"); $date_from = $_GET["date_from"] ?? date("Y-m-d", strtotime("-7 days")); $date_to = $_GET["date_to"] ?? date("Y-m-d"); $ip_filter = $_GET["ip"] ?? ""; $sql = "SELECT * FROM visits WHERE visit_date BETWEEN :from AND :to"; $params = ["from" => $date_from, "to" => $date_to]; if($ip_filter) { $sql .= " AND visitor_ip LIKE :ip"; $params["ip"] = "%$ip_filter%"; } $sql .= " ORDER BY created_at DESC"; $stmt = $pdo->prepare($sql); $stmt->execute($params); $visits = $stmt->fetchAll(PDO::FETCH_ASSOC); $total_visits = count($visits); $unique_ips = count(array_unique(array_column($visits, "visitor_ip"))); ?><!DOCTYPE html><html lang="<?= currentLanguage() ?>"><head><meta charset="UTF-8"><title><?= htmlspecialchars($site_name) ?> | <?= $pageTitle ?></title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css"><link rel="stylesheet" href="/admin/css/admin.css"></head><body class="theme-<?= getSetting("admin_theme", "light") ?>"><?php include "includes/header.php"; ?><div class="container-fluid"><div class="row"><?php include "includes/sidebar.php"; ?><main class="col-md-9 ms-sm-auto col-lg-10 px-md-4"><div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom"><h1 class="h2"><?= $pageTitle ?></h1></div><div class="row mb-3"><div class="col-md-3"><div class="card text-white bg-info"><div class="card-body"><h5 class="card-title"><?= __("total_visits") ?></h5><p class="display-6"><?= $total_visits ?></p></div></div></div><div class="col-md-3"><div class="card text-white bg-success"><div class="card-body"><h5 class="card-title"><?= __("unique_ips") ?></h5><p class="display-6"><?= $unique_ips ?></p></div></div></div></div><form method="get" class="row g-3 mb-4"><div class="col-auto"><label class="form-label"><?= __("from") ?>:</label><input type="date" class="form-control" name="date_from" value="<?= $date_from ?>"></div><div class="col-auto"><label class="form-label"><?= __("to") ?>:</label><input type="date" class="form-control" name="date_to" value="<?= $date_to ?>"></div><div class="col-auto"><label class="form-label">IP</label><input type="text" class="form-control" name="ip" placeholder="часть IP" value="<?= htmlspecialchars($ip_filter) ?>"></div><div class="col-auto align-self-end"><button type="submit" class="btn btn-primary"><?= __("filter") ?></button><a href="visitors.php" class="btn btn-secondary ms-2"><?= __("reset") ?></a></div></form><table class="table table-striped"><thead><tr><th><?= __("time") ?></th><th><?= __("ip") ?></th><th><?= __("page") ?></th><th><?= __("user_agent") ?></th></tr></thead><tbody><?php foreach($visits as $v): ?><tr><td><?= htmlspecialchars($v["created_at"]) ?></td><td><?= htmlspecialchars($v["visitor_ip"]) ?></td><td><?= htmlspecialchars($v["page_url"]) ?></td><td><?= htmlspecialchars($v["user_agent"]) ?></td></tr><?php endforeach; ?></tbody></table></main></div></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script></body></html>
 VISITORS
 
-# 6.12 settings.php (исправленный, со всеми полями)
+# 6.12 settings.php
 create_php_file "$ADMIN_DIR/settings.php" <<'SETTINGS'
-<?php require_once "includes/auth.php"; requireAdmin(); $site_name = getSetting("site_name", SITE_NAME); $pageTitle = __("settings"); $settings = []; $stmt = $pdo->query("SELECT `key`, `value` FROM settings"); while($row = $stmt->fetch(PDO::FETCH_ASSOC)) $settings[$row["key"]] = $row["value"]; if($_SERVER["REQUEST_METHOD"] === "POST") { $keys = ["site_name","admin_email","admin_theme","stats_retention","admin_lang"]; foreach($keys as $key) if(isset($_POST[$key])) $pdo->prepare("INSERT INTO settings (`key`,`value`) VALUES (?,?) ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)")->execute([$key, $_POST[$key]]); $message = "<div class=\"alert alert-success\">".__("settings_saved")."</div>"; $stmt = $pdo->query("SELECT `key`,`value` FROM settings"); $settings = []; while($row = $stmt->fetch(PDO::FETCH_ASSOC)) $settings[$row["key"]] = $row["value"]; } ?><!DOCTYPE html><html lang="<?= currentLanguage() ?>"><head><meta charset="UTF-8"><title><?= htmlspecialchars($site_name) ?> | <?= $pageTitle ?></title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css"><link rel="stylesheet" href="/admin/css/admin.css"></head><body class="theme-<?= getSetting("admin_theme", "light") ?>"><?php include "includes/header.php"; ?><div class="container-fluid"><div class="row"><?php include "includes/sidebar.php"; ?><main class="col-md-9 ms-sm-auto col-lg-10 px-md-4"><div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom"><h1 class="h2"><?= $pageTitle ?></h1></div><?php if(isset($message)) echo $message; ?><form method="post"><div class="mb-3"><label class="form-label"><?= __("site_name") ?></label><input type="text" class="form-control" name="site_name" value="<?= htmlspecialchars($settings["site_name"] ?? SITE_NAME) ?>"></div><div class="mb-3"><label class="form-label"><?= __("admin_email") ?></label><input type="email" class="form-control" name="admin_email" value="<?= htmlspecialchars($settings["admin_email"] ?? ADMIN_EMAIL) ?>"></div><div class="mb-3"><label class="form-label"><?= __("admin_theme") ?></label><select class="form-select" name="admin_theme"><option value="light" <?= ($settings["admin_theme"] ?? "light") == "light" ? "selected" : "" ?>><?= __("light") ?></option><option value="dark" <?= ($settings["admin_theme"] ?? "") == "dark" ? "selected" : "" ?>><?= __("dark") ?></option></select></div><div class="mb-3"><label class="form-label"><?= __("stats_retention") ?></label><input type="number" class="form-control" name="stats_retention" value="<?= htmlspecialchars($settings["stats_retention"] ?? 30) ?>" min="1" max="365"></div><div class="mb-3"><label class="form-label"><?= __("admin_lang") ?></label><select class="form-select" name="admin_lang"><option value="ru" <?= ($settings["admin_lang"] ?? "ru") == "ru" ? "selected" : "" ?>>Русский</option><option value="en" <?= ($settings["admin_lang"] ?? "") == "en" ? "selected" : "" ?>>English</option></select></div><button type="submit" class="btn btn-primary"><?= __("save") ?></button></form></main></div></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script></body></html>
+<?php
+require_once "includes/auth.php";
+requireAdmin();
+$site_name = getSetting("site_name", SITE_NAME);
+$pageTitle = __("settings");
+$settings = [];
+$stmt = $pdo->query("SELECT `key`, `value` FROM settings");
+while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+    $settings[$row["key"]] = $row["value"];
+}
+if ($_SERVER["REQUEST_METHOD"] === "POST") {
+    $keys = ["site_name", "admin_email", "admin_theme", "stats_retention", "admin_lang"];
+    foreach ($keys as $key) {
+        if (isset($_POST[$key])) {
+            $pdo->prepare("INSERT INTO settings (`key`, `value`) VALUES (?, ?) ON DUPLICATE KEY UPDATE `value` = VALUES(`value`)")
+                ->execute([$key, $_POST[$key]]);
+        }
+    }
+    $message = "<div class=\"alert alert-success\">" . __("settings_saved") . "</div>";
+    $stmt = $pdo->query("SELECT `key`, `value` FROM settings");
+    $settings = [];
+    while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+        $settings[$row["key"]] = $row["value"];
+    }
+}
+?>
+<!DOCTYPE html>
+<html lang="<?= currentLanguage() ?>">
+<head>
+    <meta charset="UTF-8">
+    <title><?= htmlspecialchars($site_name) ?> | <?= $pageTitle ?></title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
+    <link rel="stylesheet" href="/admin/css/admin.css">
+</head>
+<body class="theme-<?= getSetting("admin_theme", "light") ?>">
+    <?php include "includes/header.php"; ?>
+    <div class="container-fluid">
+        <div class="row">
+            <?php include "includes/sidebar.php"; ?>
+            <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4">
+                <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
+                    <h1 class="h2"><?= $pageTitle ?></h1>
+                </div>
+                <?php if (isset($message)) echo $message; ?>
+                <form method="post">
+                    <div class="mb-3">
+                        <label class="form-label"><?= __("site_name") ?></label>
+                        <input type="text" class="form-control" name="site_name" value="<?= htmlspecialchars($settings["site_name"] ?? SITE_NAME) ?>">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label"><?= __("admin_email") ?></label>
+                        <input type="email" class="form-control" name="admin_email" value="<?= htmlspecialchars($settings["admin_email"] ?? ADMIN_EMAIL) ?>">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label"><?= __("admin_theme") ?></label>
+                        <select class="form-select" name="admin_theme">
+                            <option value="light" <?= ($settings["admin_theme"] ?? "light") == "light" ? "selected" : "" ?>><?= __("light") ?></option>
+                            <option value="dark" <?= ($settings["admin_theme"] ?? "") == "dark" ? "selected" : "" ?>><?= __("dark") ?></option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label"><?= __("stats_retention") ?></label>
+                        <input type="number" class="form-control" name="stats_retention" value="<?= htmlspecialchars($settings["stats_retention"] ?? 30) ?>" min="1" max="365">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label"><?= __("admin_lang") ?></label>
+                        <select class="form-select" name="admin_lang">
+                            <option value="ru" <?= ($settings["admin_lang"] ?? "ru") == "ru" ? "selected" : "" ?>>Русский</option>
+                            <option value="en" <?= ($settings["admin_lang"] ?? "") == "en" ? "selected" : "" ?>>English</option>
+                        </select>
+                    </div>
+                    <button type="submit" class="btn btn-primary"><?= __("save") ?></button>
+                </form>
+            </main>
+        </div>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
 SETTINGS
 
 # 6.13 users.php
@@ -797,7 +919,7 @@ cat > "$ADMIN_DIR/file-picker.html" <<'PICKER'
 <!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><title>Выбор файла</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><style>.file-item{cursor:pointer}.file-item:hover{background:#f0f0f0}.thumbnail{width:100px;height:auto;max-height:100px;object-fit:cover;margin-right:15px}</style></head><body><div class="container"><h2>Выберите файл</h2><div id="file-list" class="list-group"><div class="text-center"><div class="spinner-border"></div></div></div></div><script>function escapeHtml(str){return str.replace(/[&<>]/g,function(m){if(m==="&") return "&amp;"; if(m==="<") return "&lt;"; if(m===">") return "&gt;"; return m;});}fetch("/admin/file-list.php").then(r=>r.json()).then(files=>{const c=document.getElementById("file-list");c.innerHTML="";if(files.length===0){c.innerHTML="<div class=\"alert alert-info\">Нет загруженных файлов</div>";return;}files.forEach(f=>{const d=document.createElement("div");d.className="list-group-item file-item";d.innerHTML=`<div class="row align-items-center"><div class="col-auto"><img src="${escapeHtml(f.path)}" class="thumbnail" onerror="this.style.display='none'"></div><div class="col"><strong>${escapeHtml(f.original_name)}</strong><br><small>${escapeHtml(f.type)} | ${(f.size/1024).toFixed(2)} KB</small><br><small>Загружен: ${escapeHtml(f.uploaded_at)}</small></div></div>`;d.addEventListener("click",()=>{window.parent.postMessage({mceAction:"FileSelected",url:f.path,title:f.original_name},"*");window.close();});c.appendChild(d);});}).catch(e=>{console.error(e);document.getElementById("file-list").innerHTML="<div class=\"alert alert-danger\">Ошибка</div>";});</script></body></html>
 PICKER
 
-# 6.24 analytics.php (с карточками для PHP и HTML)
+# 6.24 analytics.php
 create_php_file "$ADMIN_DIR/analytics.php" <<'ANALYTICS'
 <?php
 require_once "includes/auth.php";
@@ -1127,10 +1249,12 @@ fi
 # ----------------------------------------------------------------------
 next_step "Создание шаблона по умолчанию"
 mkdir -p "$TEMPLATES_DIR"
-cat > "$TEMPLATES_DIR/default.php" <<'DEFAULTTEMPLATE'
+if [[ ! -f "$TEMPLATES_DIR/default.php" ]] || $FORCE_MODE; then
+    cat > "$TEMPLATES_DIR/default.php" <<'DEFAULTTEMPLATE'
 <?php require_once __DIR__ . "/../config.php"; ?>
 <!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><title><?= htmlspecialchars($page["title"]) ?> | <?= htmlspecialchars(getSetting("site_name", SITE_NAME)) ?></title><meta name="description" content="<?= htmlspecialchars($page["meta_description"] ?? "") ?>"><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><style>body{font-family:"Segoe UI",Arial,sans-serif;line-height:1.6}header{background:#f8f9fa;padding:1rem;border-bottom:1px solid #dee2e6}main{padding:2rem}footer{background:#f8f9fa;padding:1rem;text-align:center;margin-top:2rem}</style></head><body><header><div class="container"><h1><a href="/" style="text-decoration:none;color:inherit;"><?= htmlspecialchars(getSetting("site_name", SITE_NAME)) ?></a></h1></div></header><main class="container"><article><h1><?= htmlspecialchars($page["title"]) ?></h1><?= $page["content"] ?></article></main><footer><div class="container">&copy; <?= date("Y") ?> <?= htmlspecialchars(getSetting("site_name", SITE_NAME)) ?></div></footer></body></html>
 DEFAULTTEMPLATE
+fi
 
 # ----------------------------------------------------------------------
 # 12. Настройка Nginx и SSL
@@ -1188,7 +1312,8 @@ fi
 # ----------------------------------------------------------------------
 next_step "Настройка cron для метрик"
 CRON_SCRIPT="/usr/local/bin/collect_server_stats.sh"
-cat > "$CRON_SCRIPT" <<EOF
+if [[ ! -f "$CRON_SCRIPT" ]] || $FORCE_MODE; then
+    cat > "$CRON_SCRIPT" <<EOF
 #!/bin/bash
 source "${SCRIPT_DIR}/.env"
 load=\$(awk '{print \$1}' /proc/loadavg)
@@ -1206,9 +1331,12 @@ retention=\${retention:-30}
 mysql --defaults-file=/root/.my.cnf "$DB_NAME" -e "DELETE FROM visits WHERE visit_date < DATE_SUB(CURDATE(), INTERVAL \$retention DAY)"
 mysql --defaults-file=/root/.my.cnf "$DB_NAME" -e "DELETE FROM server_stats WHERE recorded_at < DATE_SUB(NOW(), INTERVAL \$retention DAY)"
 EOF
-chmod +x "$CRON_SCRIPT"
-if ! grep -q "$CRON_SCRIPT" /etc/crontab; then
-    echo "*/5 * * * * root $CRON_SCRIPT > /dev/null 2>&1" >> /etc/crontab
+    chmod +x "$CRON_SCRIPT"
+    log_only "Cron-скрипт создан/обновлён."
+    if ! grep -q "$CRON_SCRIPT" /etc/crontab; then
+        echo "*/5 * * * * root $CRON_SCRIPT > /dev/null 2>&1" >> /etc/crontab
+        log_only "Cron-задание добавлено."
+    fi
 fi
 
 # ----------------------------------------------------------------------
