@@ -76,7 +76,8 @@ create_php_file() {
     fi
     
     mkdir -p "$(dirname "$file")"
-    echo "$content" > "$file"
+    # Используем printf вместо echo, чтобы избежать интерпретации символов
+    printf '%s' "$content" > "$file"
     log_only "Файл $file создан/обновлён."
     
     if [[ "$file" == *.php ]]; then
