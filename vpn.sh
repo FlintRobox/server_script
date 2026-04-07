@@ -119,15 +119,19 @@ if systemctl list-units --full --all | grep -q "$XUI_SERVICE.service"; then
     log "${GREEN}3X-UI уже установлен.${NC}"
 else
     log "${YELLOW}Установка 3X-UI...${NC}"
-    # Скачиваем скрипт установки с таймаутом
     INSTALL_SCRIPT="/tmp/install_3xui.sh"
     if curl -fsSL --connect-timeout 10 --max-time 30 https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh -o "$INSTALL_SCRIPT"; then
-        # Автоматически отвечаем "yes" на все вопросы и запускаем
-        yes | bash "$INSTALL_SCRIPT" >> "$LOG_FILE" 2>&1
-        rm -f "$INSTALL_SCRIPT"
-        # Останавливаем панель для дальнейшей настройки
-        systemctl stop $XUI_SERVICE
-        log "${GREEN}3X-UI установлен.${NC}"
+        chmod +x "$INSTALL_SCRIPT"
+        # Запускаем установку с таймаутом 300 секунд (5 минут)
+        if timeout 300 bash "$INSTALL_SCRIPT" <<< "y" >> "$LOG_FILE" 2>&1; then
+            rm -f "$INSTALL_SCRIPT"
+            systemctl stop $XUI_SERVICE
+            log "${GREEN}3X-UI установлен.${NC}"
+        else
+            log "${RED}Установка 3X-UI не завершилась за 5 минут или произошла ошибка.${NC}"
+            log "${YELLOW}Попробуйте установить 3X-UI вручную: https://github.com/mhsanaei/3x-ui${NC}"
+            exit 1
+        fi
     else
         log "${RED}Не удалось загрузить скрипт установки 3X-UI. Проверьте подключение к интернету.${NC}"
         exit 1
