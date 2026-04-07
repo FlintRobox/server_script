@@ -347,6 +347,20 @@ ADMIN_HASH=$(php -r "echo password_hash('$ADMIN_PASSWORD', PASSWORD_DEFAULT);")
 mysql $MYSQL_ROOT_OPTS "$DB_NAME" -e "INSERT IGNORE INTO users (login, password_hash, role, email) VALUES ('admin', '$ADMIN_HASH', 'admin', '$ADMIN_EMAIL');"
 log_only "Таблицы CMS и AI созданы, администратор добавлен."
 
+# ---- Инициализация настроек по умолчанию ----
+mysql $MYSQL_ROOT_OPTS "$DB_NAME" <<EOF
+INSERT INTO settings (\`key\`, \`value\`) VALUES 
+('site_name', '${SITE_NAME}'),
+('admin_email', '${ADMIN_EMAIL}'),
+('admin_theme', 'light'),
+('stats_retention', '30'),
+('admin_lang', 'ru'),
+('deepseek_model', 'deepseek-chat'),
+('deepseek_max_tokens', '2000')
+ON DUPLICATE KEY UPDATE \`value\` = VALUES(\`value\`);
+EOF
+log_only "Настройки по умолчанию добавлены в БД."
+
 # ----------------------------------------------------------------------
 # 5. Языковые файлы (полные, включая AI, добавлен ключ remove_tracker)
 # ----------------------------------------------------------------------
