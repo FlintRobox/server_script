@@ -1,12 +1,11 @@
 #!/bin/bash
 # =====================================================================
 # vpn.sh - Развертывание VPN-сервера (3X-UI) с интеграцией на одном домене
-# Версия: 3.8 (принудительная перезапись конфигурации Nginx)
+# Версия: 3.9 (удалён проблемный IPv6-слушатель)
 # =====================================================================
 
 set -euo pipefail
 
-# Подключаем общую библиотеку
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ ! -f "$SCRIPT_DIR/lib.sh" ]]; then
     echo -e "\033[0;31mОшибка: файл lib.sh не найден в директории $SCRIPT_DIR.\033[0m"
@@ -84,8 +83,7 @@ if [[ ! -f "$NGINX_CONF" ]]; then
     exit 1
 fi
 
-# Принудительно перезаписываем конфигурацию, предварительно создав бэкап
-log "${YELLOW}Создаём резервную копию текущей конфигурации и генерируем новую...${NC}"
+log "${YELLOW}Создаём резервную копию текущей конфигурации и генерируем новую (без IPv6)...${NC}"
 cp "$NGINX_CONF" "$NGINX_CONF.bak.$(date +%Y%m%d%H%M%S)"
 cat > "$NGINX_CONF" <<EOF
 server {
@@ -97,7 +95,6 @@ server {
 
 server {
     listen 127.0.0.1:$NGINX_LOCAL_PORT ssl;
-    listen [::1]:$NGINX_LOCAL_PORT ssl;
     server_name $DOMAIN;
     root $SITE_DIR;
     index index.php index.html;
