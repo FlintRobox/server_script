@@ -1,7 +1,7 @@
 #!/bin/bash
 # =====================================================================
 # vpn.sh - Развертывание VPN-сервера (3X-UI) с интеграцией на одном домене
-# Версия: 3.2 (добавлены проверки, диагностика, исправлен выход)
+# Версия: 3.3 (улучшена установка 3X-UI, добавлены таймауты и обработка ошибок)
 # =====================================================================
 
 set -euo pipefail
@@ -114,11 +114,19 @@ if systemctl list-units --full --all | grep -q "$XUI_SERVICE.service"; then
 else
     log "${YELLOW}Установка 3X-UI...${NC}"
     INSTALL_SCRIPT="/tmp/install_3xui.sh"
+    # Скачиваем скрипт с таймаутом
     if curl -fsSL --connect-timeout 10 --max-time 30 https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh -o "$INSTALL_SCRIPT"; then
-        yes | bash "$INSTALL_SCRIPT" >> "$LOG_FILE" 2>&1
-        rm -f "$INSTALL_SCRIPT"
-        systemctl stop $XUI_SERVICE
-        log "${GREEN}3X-UI установлен.${NC}"
+        chmod +x "$INSTALL_SCRIPT"
+        # Запускаем скрипт с таймаутом 300 секунд, перенаправляя stdin из /dev/null
+        if timeout 300 bash "$INSTALL_SCRIPT" </dev/null >> "$LOG_FILE" 2>&1; then
+            rm -f "$INSTALL_SCRIPT"
+            systemctl stop $XUI_SERVICE
+            log "${GREEN}3X-UI установлен.${NC}"
+        else
+            rm -f "$INSTALL_SCRIPT"
+            log "${RED}Установка 3X-UI не завершилась успешно или превысила время ожидания.${NC}"
+            exit 1
+        fi
     else
         log "${RED}Не удалось загрузить скрипт установки 3X-UI. Проверьте подключение к интернету.${NC}"
         exit 1
@@ -173,7 +181,6 @@ log "UFW настроен."
 
 # --- Генерация ключей Reality ---
 log "Генерация ключей Reality..."
-# Устанавливаем xray-core, если его нет
 if ! command -v xray &>/dev/null; then
     log "${YELLOW}xray-core не найден. Устанавливаем...${NC}"
     bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >> "$LOG_FILE" 2>&1
