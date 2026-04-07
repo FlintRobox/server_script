@@ -1,7 +1,7 @@
 #!/bin/bash
 # =====================================================================
 # vpn.sh - Развертывание VPN-сервера (3X-UI) с интеграцией на одном домене
-# Версия: 3.5 (исправлен парсинг ключей Reality, обработка ошибок)
+# Версия: 3.6 (исправлено дублирование в .env, добавлены функции)
 # =====================================================================
 
 set -euo pipefail
@@ -22,6 +22,17 @@ sqlite3_escape() {
     sed "s/'/''/g"
 }
 
+# Функция безопасного добавления переменной в .env (если отсутствует)
+add_to_env() {
+    local key="$1"
+    local value="$2"
+    local env_file="$SCRIPT_DIR/.env"
+    if ! grep -q "^${key}=" "$env_file"; then
+        echo "${key}=\"${value}\"" >> "$env_file"
+        log_only "Добавлена переменная ${key} в .env"
+    fi
+}
+
 # --- Проверка прав root ---
 if [[ $EUID -ne 0 ]]; then
     log "${RED}Ошибка: скрипт должен запускаться от root (или с sudo).${NC}"
@@ -30,6 +41,12 @@ fi
 
 # --- Загрузка конфигурации ---
 load_env "DOMAIN" "ADMIN_EMAIL"
+
+# --- Определение дополнительных переменных ---
+WEB_ROOT_BASE="${WEB_ROOT_BASE:-/var/www}"
+SITE_DIR="${WEB_ROOT_BASE}/${DOMAIN}"
+PHP_VERSION="8.3"
+PHP_SOCKET="/run/php/php${PHP_VERSION}-fpm.sock"
 
 # --- Проверка наличия необходимых утилит ---
 for pkg in sqlite3 jq curl; do
@@ -69,7 +86,7 @@ if [[ -z "$NGINX_LOCAL_PORT" ]]; then
         log "${RED}Не найден свободный порт в диапазоне 10443-10543.${NC}"
         exit 1
     fi
-    echo "NGINX_LOCAL_PORT=$NGINX_LOCAL_PORT" >> "$SCRIPT_DIR/.env"
+    add_to_env "NGINX_LOCAL_PORT" "$NGINX_LOCAL_PORT"
     log_only "Выбран локальный порт для Nginx: $NGINX_LOCAL_PORT"
 fi
 
@@ -87,13 +104,41 @@ log_only "Создана резервная копия $BACKUP_FILE"
 if grep -q "listen 127.0.0.1:$NGINX_LOCAL_PORT" "$NGINX_CONF"; then
     log "${YELLOW}Nginx уже настроен на локальный порт $NGINX_LOCAL_PORT. Пропуск изменения конфигурации.${NC}"
 else
-    sed -i "/listen .*;/ { /listen 127.0.0.1:$NGINX_LOCAL_PORT/! d }" "$NGINX_CONF"
-    if ! grep -q "listen 127.0.0.1:$NGINX_LOCAL_PORT" "$NGINX_CONF"; then
-        sed -i "/server_name .*;/a \    listen 127.0.0.1:$NGINX_LOCAL_PORT ssl;" "$NGINX_CONF"
-    fi
-    if ! grep -q "ssl_certificate .*fullchain.pem" "$NGINX_CONF"; then
-        sed -i "/server_name .*;/a \    ssl_certificate $SSL_DIR/fullchain.pem;\n    ssl_certificate_key $SSL_DIR/privkey.pem;" "$NGINX_CONF"
-    fi
+    cat > "$NGINX_CONF" <<EOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $DOMAIN;
+    return 301 https://\$server_name\$request_uri;
+}
+
+server {
+    listen 127.0.0.1:$NGINX_LOCAL_PORT ssl;
+    listen [::1]:$NGINX_LOCAL_PORT ssl;
+    server_name $DOMAIN;
+    root $SITE_DIR;
+    index index.php index.html;
+
+    ssl_certificate $SSL_DIR/fullchain.pem;
+    ssl_certificate_key $SSL_DIR/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    location / {
+        try_files \$uri \$uri/ /index.php?\$args;
+    }
+
+    location ~ \.php\$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:$PHP_SOCKET;
+    }
+
+    location ^~ /uploads {
+        location ~ \.php\$ { deny all; }
+    }
+
+    server_tokens off;
+}
+EOF
     if nginx -t >> "$LOG_FILE" 2>&1; then
         systemctl reload nginx
         log "${GREEN}Конфигурация Nginx обновлена: сайт слушает на 127.0.0.1:$NGINX_LOCAL_PORT.${NC}"
@@ -134,19 +179,19 @@ fi
 # --- Генерация параметров панели (если не заданы в .env) ---
 if [[ -z "${XUI_PORT:-}" ]]; then
     XUI_PORT=$(( RANDOM % 1000 + 52000 ))
-    echo "XUI_PORT=$XUI_PORT" >> "$SCRIPT_DIR/.env"
+    add_to_env "XUI_PORT" "$XUI_PORT"
 fi
 if [[ -z "${XUI_PATH:-}" ]]; then
     XUI_PATH="/$(openssl rand -hex 8)"
-    echo "XUI_PATH=$XUI_PATH" >> "$SCRIPT_DIR/.env"
+    add_to_env "XUI_PATH" "$XUI_PATH"
 fi
 if [[ -z "${XUI_USERNAME:-}" ]]; then
     XUI_USERNAME="admin_$(openssl rand -hex 4)"
-    echo "XUI_USERNAME=$XUI_USERNAME" >> "$SCRIPT_DIR/.env"
+    add_to_env "XUI_USERNAME" "$XUI_USERNAME"
 fi
 if [[ -z "${XUI_PASSWORD:-}" ]]; then
     XUI_PASSWORD=$(openssl rand -base64 16 | tr -dc 'A-Za-z0-9!?@#' | head -c20)
-    echo "XUI_PASSWORD=$XUI_PASSWORD" >> "$SCRIPT_DIR/.env"
+    add_to_env "XUI_PASSWORD" "$XUI_PASSWORD"
 fi
 
 # --- Настройка панели через утилиту x-ui ---
@@ -173,7 +218,6 @@ fi
 ufw allow 443/tcp >> "$LOG_FILE" 2>&1
 ufw allow 443/udp >> "$LOG_FILE" 2>&1
 
-# Порт подписок (по умолчанию 2096)
 SUBSCRIPTION_PORT=$(sqlite3 "$DB_PATH" "SELECT value FROM settings WHERE key='subscriptionPort';" 2>/dev/null)
 if [[ -z "$SUBSCRIPTION_PORT" ]]; then
     SUBSCRIPTION_PORT="2096"
@@ -183,7 +227,7 @@ ufw allow "$SUBSCRIPTION_PORT"/tcp >> "$LOG_FILE" 2>&1
 ufw reload >> "$LOG_FILE" 2>&1
 log "UFW настроен."
 
-# --- Генерация ключей Reality (с поддержкой обоих форматов вывода xray) ---
+# --- Генерация ключей Reality ---
 log "Генерация ключей Reality..."
 
 # Функция установки xray-core
@@ -201,7 +245,6 @@ install_xray() {
     return 0
 }
 
-# Проверяем наличие xray
 if ! command -v xray &>/dev/null; then
     if ! install_xray; then
         log "${RED}Не удалось установить xray-core.${NC}"
@@ -217,7 +260,6 @@ fi
 
 log "Используется xray: $XRAY_BIN"
 
-# Генерируем ключи и парсим вывод (поддерживаем старый и новый формат)
 KEY_PAIR=$("$XRAY_BIN" x25519)
 PRIVATE_KEY=$(echo "$KEY_PAIR" | grep -E "(Private key:|PrivateKey:)" | awk '{print $2}')
 PUBLIC_KEY=$(echo "$KEY_PAIR" | grep -E "(Public key:|Password \(PublicKey\):|PublicKey:)" | awk '{print $2}')
