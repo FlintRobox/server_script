@@ -1,7 +1,7 @@
 #!/bin/bash
 # =====================================================================
 # vpn.sh - Развертывание VPN-сервера (3X-UI) с интеграцией на одном домене
-# Версия: 3.1 (исправлена работа с Nginx, добавлена sqlite3_escape)
+# Версия: 3.1 (исправлена установка 3X-UI, таймауты, обработка ошибок)
 # =====================================================================
 
 set -euo pipefail
@@ -17,7 +17,7 @@ source "$SCRIPT_DIR/lib.sh"
 # Инициализация флага принудительной перезаписи
 init_force_mode "$@"
 
-# --- Экранирование строки для SQLite (удвоение одинарных кавычек) ---
+# Функция экранирования для SQLite (определяем здесь, если нет в lib.sh)
 sqlite3_escape() {
     sed "s/'/''/g"
 }
@@ -32,7 +32,7 @@ fi
 load_env "DOMAIN" "ADMIN_EMAIL"
 
 # --- Проверка наличия необходимых утилит (sqlite3, jq) ---
-for pkg in sqlite3 jq; do
+for pkg in sqlite3 jq curl; do
     if ! command -v $pkg &>/dev/null; then
         log "${YELLOW}Установка $pkg...${NC}"
         apt update && apt install -y $pkg >> "$LOG_FILE" 2>&1
@@ -89,12 +89,12 @@ log_only "Создана резервная копия $BACKUP_FILE"
 if grep -q "listen 127.0.0.1:$NGINX_LOCAL_PORT" "$NGINX_CONF"; then
     log "${YELLOW}Nginx уже настроен на локальный порт $NGINX_LOCAL_PORT. Пропуск изменения конфигурации.${NC}"
 else
-    # Удаляем все директивы listen на внешних портах (80 и 443)
-    # Используем более точную замену: удаляем строки с listen, кроме локального
-    sed -i "/listen [0-9]\+;/d" "$NGINX_CONF"
-    sed -i "/listen \[::\]:[0-9]\+;/d" "$NGINX_CONF"
-    # Добавляем новую директиву listen после server_name
-    sed -i "/server_name .*;/a \    listen 127.0.0.1:$NGINX_LOCAL_PORT ssl;" "$NGINX_CONF"
+    # Удаляем все директивы listen, которые не относятся к локальному порту
+    sed -i "/listen .*;/ { /listen 127.0.0.1:$NGINX_LOCAL_PORT/! d }" "$NGINX_CONF"
+    # Добавляем новую директиву listen после server_name, если её ещё нет
+    if ! grep -q "listen 127.0.0.1:$NGINX_LOCAL_PORT" "$NGINX_CONF"; then
+        sed -i "/server_name .*;/a \    listen 127.0.0.1:$NGINX_LOCAL_PORT ssl;" "$NGINX_CONF"
+    fi
     # Убеждаемся, что пути к сертификатам указаны
     if ! grep -q "ssl_certificate .*fullchain.pem" "$NGINX_CONF"; then
         sed -i "/server_name .*;/a \    ssl_certificate $SSL_DIR/fullchain.pem;\n    ssl_certificate_key $SSL_DIR/privkey.pem;" "$NGINX_CONF"
@@ -115,13 +115,23 @@ fi
 
 # --- Установка 3X-UI (если не установлен) ---
 XUI_SERVICE="x-ui"
-if ! systemctl list-units --full -all | grep -q "$XUI_SERVICE.service"; then
-    log "${YELLOW}Установка 3X-UI...${NC}"
-    yes | bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh) >> "$LOG_FILE" 2>&1
-    systemctl stop $XUI_SERVICE
-    log "${GREEN}3X-UI установлен.${NC}"
-else
+if systemctl list-units --full --all | grep -q "$XUI_SERVICE.service"; then
     log "${GREEN}3X-UI уже установлен.${NC}"
+else
+    log "${YELLOW}Установка 3X-UI...${NC}"
+    # Скачиваем скрипт установки с таймаутом
+    INSTALL_SCRIPT="/tmp/install_3xui.sh"
+    if curl -fsSL --connect-timeout 10 --max-time 30 https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh -o "$INSTALL_SCRIPT"; then
+        # Автоматически отвечаем "yes" на все вопросы и запускаем
+        yes | bash "$INSTALL_SCRIPT" >> "$LOG_FILE" 2>&1
+        rm -f "$INSTALL_SCRIPT"
+        # Останавливаем панель для дальнейшей настройки
+        systemctl stop $XUI_SERVICE
+        log "${GREEN}3X-UI установлен.${NC}"
+    else
+        log "${RED}Не удалось загрузить скрипт установки 3X-UI. Проверьте подключение к интернету.${NC}"
+        exit 1
+    fi
 fi
 
 # --- Генерация параметров панели (если не заданы в .env) ---
@@ -191,7 +201,6 @@ fi
 log_only "Reality ключи сгенерированы."
 
 # --- Создание inbound для VPN (vless+reality) ---
-# Формируем JSON для inbound
 INBOUND_JSON=$(cat <<EOF
 {
   "protocol": "vless",
@@ -232,7 +241,6 @@ if [[ -z "$EXISTING_INBOUND" ]] || $FORCE_MODE; then
         sqlite3 "$DB_PATH" "DELETE FROM inbounds WHERE id=$EXISTING_INBOUND;" >> "$LOG_FILE" 2>&1
         log_only "Удалён старый inbound на порту 443."
     fi
-    # Экранируем JSON для вставки в SQLite
     ESCAPED_JSON=$(echo "$INBOUND_JSON" | sqlite3_escape)
     sqlite3 "$DB_PATH" "INSERT INTO inbounds (port, protocol, settings, stream_settings, sniffing, enable, tag) VALUES (443, 'vless', '$ESCAPED_JSON', '$ESCAPED_JSON', '$ESCAPED_JSON', 1, 'vless-reality-inbound');" >> "$LOG_FILE" 2>&1
     log "${GREEN}Inbound для VPN создан.${NC}"
@@ -257,14 +265,10 @@ CLIENT_JSON=$(cat <<EOF
 EOF
 )
 
-# Получаем ID inbound (только что созданный или существующий)
 INBOUND_ID=$(sqlite3 "$DB_PATH" "SELECT id FROM inbounds WHERE port=443 LIMIT 1;")
 if [[ -n "$INBOUND_ID" ]]; then
-    # Получаем текущие настройки inbound
     CURRENT_SETTINGS=$(sqlite3 "$DB_PATH" "SELECT settings FROM inbounds WHERE id=$INBOUND_ID;")
-    # Добавляем клиента в массив clients через jq
     NEW_SETTINGS=$(echo "$CURRENT_SETTINGS" | jq ".clients += [$CLIENT_JSON]")
-    # Экранируем для SQLite
     ESCAPED_SETTINGS=$(echo "$NEW_SETTINGS" | sqlite3_escape)
     sqlite3 "$DB_PATH" "UPDATE inbounds SET settings='$ESCAPED_SETTINGS' WHERE id=$INBOUND_ID;" >> "$LOG_FILE" 2>&1
     log "${GREEN}Клиент добавлен (UUID: $CLIENT_UUID).${NC}"
