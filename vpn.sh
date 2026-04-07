@@ -1,7 +1,7 @@
 #!/bin/bash
 # =====================================================================
 # vpn.sh - Развертывание VPN-сервера (3X-UI) с интеграцией на одном домене
-# Версия: 3.0 (исправлена работа с SQLite, генерация ключей, установка зависимостей)
+# Версия: 3.1 (исправлена работа с Nginx, добавлена sqlite3_escape)
 # =====================================================================
 
 set -euo pipefail
@@ -14,13 +14,13 @@ if [[ ! -f "$SCRIPT_DIR/lib.sh" ]]; then
 fi
 source "$SCRIPT_DIR/lib.sh"
 
-# Экранирование строки для SQLite (удвоение одинарных кавычек)
+# Инициализация флага принудительной перезаписи
+init_force_mode "$@"
+
+# --- Экранирование строки для SQLite (удвоение одинарных кавычек) ---
 sqlite3_escape() {
     sed "s/'/''/g"
 }
-
-# Инициализация флага принудительной перезаписи
-init_force_mode "$@"
 
 # --- Проверка прав root ---
 if [[ $EUID -ne 0 ]]; then
@@ -80,16 +80,19 @@ if [[ ! -f "$NGINX_CONF" ]]; then
     exit 1
 fi
 
-# Создаём резервную копию
-cp "$NGINX_CONF" "$NGINX_CONF.bak.$(date +%Y%m%d%H%M%S)"
+# Создаём резервную копию с фиксированным именем
+BACKUP_FILE="$NGINX_CONF.bak"
+cp "$NGINX_CONF" "$BACKUP_FILE"
+log_only "Создана резервная копия $BACKUP_FILE"
 
 # Проверяем, не настроен ли уже fallback
 if grep -q "listen 127.0.0.1:$NGINX_LOCAL_PORT" "$NGINX_CONF"; then
     log "${YELLOW}Nginx уже настроен на локальный порт $NGINX_LOCAL_PORT. Пропуск изменения конфигурации.${NC}"
 else
-    # Удаляем все listen на внешних интерфейсах (80 и 443)
-    sed -i "/listen .*80/d" "$NGINX_CONF"
-    sed -i "/listen .*443/d" "$NGINX_CONF"
+    # Удаляем все директивы listen на внешних портах (80 и 443)
+    # Используем более точную замену: удаляем строки с listen, кроме локального
+    sed -i "/listen [0-9]\+;/d" "$NGINX_CONF"
+    sed -i "/listen \[::\]:[0-9]\+;/d" "$NGINX_CONF"
     # Добавляем новую директиву listen после server_name
     sed -i "/server_name .*;/a \    listen 127.0.0.1:$NGINX_LOCAL_PORT ssl;" "$NGINX_CONF"
     # Убеждаемся, что пути к сертификатам указаны
@@ -101,8 +104,10 @@ else
         systemctl reload nginx
         log "${GREEN}Конфигурация Nginx обновлена: сайт слушает на 127.0.0.1:$NGINX_LOCAL_PORT.${NC}"
     else
-        log "${RED}Ошибка в конфигурации Nginx. Восстанавливаем резервную копию.${NC}"
-        mv "$NGINX_CONF.bak" "$NGINX_CONF"
+        log "${RED}Ошибка в конфигурации Nginx:${NC}"
+        nginx -t 2>&1 | tee -a "$LOG_FILE"
+        log "${RED}Восстанавливаем резервную копию.${NC}"
+        mv "$BACKUP_FILE" "$NGINX_CONF"
         systemctl reload nginx
         exit 1
     fi
@@ -227,7 +232,7 @@ if [[ -z "$EXISTING_INBOUND" ]] || $FORCE_MODE; then
         sqlite3 "$DB_PATH" "DELETE FROM inbounds WHERE id=$EXISTING_INBOUND;" >> "$LOG_FILE" 2>&1
         log_only "Удалён старый inbound на порту 443."
     fi
-    # Вставляем новый inbound, экранируя кавычки
+    # Экранируем JSON для вставки в SQLite
     ESCAPED_JSON=$(echo "$INBOUND_JSON" | sqlite3_escape)
     sqlite3 "$DB_PATH" "INSERT INTO inbounds (port, protocol, settings, stream_settings, sniffing, enable, tag) VALUES (443, 'vless', '$ESCAPED_JSON', '$ESCAPED_JSON', '$ESCAPED_JSON', 1, 'vless-reality-inbound');" >> "$LOG_FILE" 2>&1
     log "${GREEN}Inbound для VPN создан.${NC}"
