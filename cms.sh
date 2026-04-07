@@ -693,107 +693,106 @@ create_php_file "$ADMIN_DIR/visitors.php" <<'VISITORS'
 <?php require_once "includes/auth.php"; requireLogin(); $site_name = getSetting("site_name", SITE_NAME); $pageTitle = __("visitors"); $date_from = $_GET["date_from"] ?? date("Y-m-d", strtotime("-7 days")); $date_to = $_GET["date_to"] ?? date("Y-m-d"); $ip_filter = $_GET["ip"] ?? ""; $sql = "SELECT * FROM visits WHERE visit_date BETWEEN :from AND :to"; $params = ["from" => $date_from, "to" => $date_to]; if($ip_filter) { $sql .= " AND visitor_ip LIKE :ip"; $params["ip"] = "%$ip_filter%"; } $sql .= " ORDER BY created_at DESC"; $stmt = $pdo->prepare($sql); $stmt->execute($params); $visits = $stmt->fetchAll(PDO::FETCH_ASSOC); $total_visits = count($visits); $unique_ips = count(array_unique(array_column($visits, "visitor_ip"))); ?><!DOCTYPE html><html lang="<?= currentLanguage() ?>"><head><meta charset="UTF-8"><title><?= htmlspecialchars($site_name) ?> | <?= $pageTitle ?></title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css"><link rel="stylesheet" href="/admin/css/admin.css"></head><body class="theme-<?= getSetting("admin_theme", "light") ?>"><?php include "includes/header.php"; ?><div class="container-fluid"><div class="row"><?php include "includes/sidebar.php"; ?><main class="col-md-9 ms-sm-auto col-lg-10 px-md-4"><div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom"><h1 class="h2"><?= $pageTitle ?></h1></div><div class="row mb-3"><div class="col-md-3"><div class="card text-white bg-info"><div class="card-body"><h5 class="card-title"><?= __("total_visits") ?></h5><p class="display-6"><?= $total_visits ?></p></div></div></div><div class="col-md-3"><div class="card text-white bg-success"><div class="card-body"><h5 class="card-title"><?= __("unique_ips") ?></h5><p class="display-6"><?= $unique_ips ?></p></div></div></div></div><form method="get" class="row g-3 mb-4"><div class="col-auto"><label class="form-label"><?= __("from") ?>:</label><input type="date" class="form-control" name="date_from" value="<?= $date_from ?>"></div><div class="col-auto"><label class="form-label"><?= __("to") ?>:</label><input type="date" class="form-control" name="date_to" value="<?= $date_to ?>"></div><div class="col-auto"><label class="form-label">IP</label><input type="text" class="form-control" name="ip" placeholder="часть IP" value="<?= htmlspecialchars($ip_filter) ?>"></div><div class="col-auto align-self-end"><button type="submit" class="btn btn-primary"><?= __("filter") ?></button><a href="visitors.php" class="btn btn-secondary ms-2"><?= __("reset") ?></a></div></form><table class="table table-striped"><thead><tr><th><?= __("time") ?></th><th><?= __("ip") ?></th><th><?= __("page") ?></th><th><?= __("user_agent") ?></th></tr></thead><tbody><?php foreach($visits as $v): ?><tr><td><?= htmlspecialchars($v["created_at"]) ?></td><td><?= htmlspecialchars($v["visitor_ip"]) ?></td><td><?= htmlspecialchars($v["page_url"]) ?></td><td><?= htmlspecialchars($v["user_agent"]) ?></td></tr><?php endforeach; ?></tbody></table></main></div></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script></body></html>
 VISITORS
 
-# 6.12 settings.php (исправлен: переписан через create_php_file, полный)
-create_php_file "$ADMIN_DIR/settings.php" <<'SETTINGS'
-<?php
-require_once "includes/auth.php";
+# 6.12 settings.php
+next_step "Создание settings.php"
+create_php_file "$ADMIN_DIR/settings.php" "<?php
+require_once \"includes/auth.php\";
 requireAdmin();
-$site_name = getSetting("site_name", SITE_NAME);
-$pageTitle = __("settings");
-$settings = [];
-$stmt = $pdo->query("SELECT `key`, `value` FROM settings");
-while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-    $settings[$row["key"]] = $row["value"];
+\$site_name = getSetting(\"site_name\", SITE_NAME);
+\$pageTitle = __(\"settings\");
+\$settings = [];
+\$stmt = \$pdo->query(\"SELECT \`key\`, \`value\` FROM settings\");
+while (\$row = \$stmt->fetch(PDO::FETCH_ASSOC)) {
+    \$settings[\$row[\"key\"]] = \$row[\"value\"];
 }
-if ($_SERVER["REQUEST_METHOD"] === "POST") {
-    $keys = ["site_name", "admin_email", "admin_theme", "stats_retention", "admin_lang", "deepseek_api_key", "deepseek_model", "deepseek_max_tokens"];
-    foreach ($keys as $key) {
-        if (isset($_POST[$key])) {
-            $pdo->prepare("INSERT INTO settings (`key`, `value`) VALUES (?, ?) ON DUPLICATE KEY UPDATE `value` = VALUES(`value`)")
-                ->execute([$key, $_POST[$key]]);
+if (\$_SERVER[\"REQUEST_METHOD\"] === \"POST\") {
+    \$keys = [\"site_name\", \"admin_email\", \"admin_theme\", \"stats_retention\", \"admin_lang\", \"deepseek_api_key\", \"deepseek_model\", \"deepseek_max_tokens\"];
+    foreach (\$keys as \$key) {
+        if (isset(\$_POST[\$key])) {
+            \$pdo->prepare(\"INSERT INTO settings (\`key\`, \`value\`) VALUES (?, ?) ON DUPLICATE KEY UPDATE \`value\` = VALUES(\`value\`)\")
+                ->execute([\$key, \$_POST[\$key]]);
         }
     }
-    $message = "<div class=\"alert alert-success\">" . __("settings_saved") . "</div>";
-    $stmt = $pdo->query("SELECT `key`, `value` FROM settings");
-    $settings = [];
-    while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-        $settings[$row["key"]] = $row["value"];
+    \$message = \"<div class=\\\"alert alert-success\\\">\" . __(\"settings_saved\") . \"</div>\";
+    \$stmt = \$pdo->query(\"SELECT \`key\`, \`value\` FROM settings\");
+    \$settings = [];
+    while (\$row = \$stmt->fetch(PDO::FETCH_ASSOC)) {
+        \$settings[\$row[\"key\"]] = \$row[\"value\"];
     }
 }
 ?>
 <!DOCTYPE html>
-<html lang="<?= currentLanguage() ?>">
+<html lang=\"<?= currentLanguage() ?>\">
 <head>
-    <meta charset="UTF-8">
-    <title><?= htmlspecialchars($site_name) ?> | <?= $pageTitle ?></title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
-    <link rel="stylesheet" href="/admin/css/admin.css">
+    <meta charset=\"UTF-8\">
+    <title><?= htmlspecialchars(\$site_name) ?> | <?= \$pageTitle ?></title>
+    <link href=\"https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css\" rel=\"stylesheet\">
+    <link rel=\"stylesheet\" href=\"https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css\">
+    <link rel=\"stylesheet\" href=\"/admin/css/admin.css\">
 </head>
-<body class="theme-<?= getSetting("admin_theme", "light") ?>">
-    <?php include "includes/header.php"; ?>
-    <div class="container-fluid">
-        <div class="row">
-            <?php include "includes/sidebar.php"; ?>
-            <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4">
-                <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
-                    <h1 class="h2"><?= $pageTitle ?></h1>
+<body class=\"theme-<?= getSetting(\"admin_theme\", \"light\") ?>\">
+    <?php include \"includes/header.php\"; ?>
+    <div class=\"container-fluid\">
+        <div class=\"row\">
+            <?php include \"includes/sidebar.php\"; ?>
+            <main class=\"col-md-9 ms-sm-auto col-lg-10 px-md-4\">
+                <div class=\"d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom\">
+                    <h1 class=\"h2\"><?= \$pageTitle ?></h1>
                 </div>
-                <?php if (isset($message)) echo $message; ?>
-                <form method="post">
-                    <div class="mb-3">
-                        <label class="form-label"><?= __("site_name") ?></label>
-                        <input type="text" class="form-control" name="site_name" value="<?= htmlspecialchars($settings["site_name"] ?? SITE_NAME) ?>">
+                <?php if (isset(\$message)) echo \$message; ?>
+                <form method=\"post\">
+                    <div class=\"mb-3\">
+                        <label class=\"form-label\"><?= __(\"site_name\") ?></label>
+                        <input type=\"text\" class=\"form-control\" name=\"site_name\" value=\"<?= htmlspecialchars(\$settings[\"site_name\"] ?? SITE_NAME) ?>\">
                     </div>
-                    <div class="mb-3">
-                        <label class="form-label"><?= __("admin_email") ?></label>
-                        <input type="email" class="form-control" name="admin_email" value="<?= htmlspecialchars($settings["admin_email"] ?? ADMIN_EMAIL) ?>">
+                    <div class=\"mb-3\">
+                        <label class=\"form-label\"><?= __(\"admin_email\") ?></label>
+                        <input type=\"email\" class=\"form-control\" name=\"admin_email\" value=\"<?= htmlspecialchars(\$settings[\"admin_email\"] ?? ADMIN_EMAIL) ?>\">
                     </div>
-                    <div class="mb-3">
-                        <label class="form-label"><?= __("admin_theme") ?></label>
-                        <select class="form-select" name="admin_theme">
-                            <option value="light" <?= ($settings["admin_theme"] ?? "light") == "light" ? "selected" : "" ?>><?= __("light") ?></option>
-                            <option value="dark" <?= ($settings["admin_theme"] ?? "") == "dark" ? "selected" : "" ?>><?= __("dark") ?></option>
+                    <div class=\"mb-3\">
+                        <label class=\"form-label\"><?= __(\"admin_theme\") ?></label>
+                        <select class=\"form-select\" name=\"admin_theme\">
+                            <option value=\"light\" <?= (\$settings[\"admin_theme\"] ?? \"light\") == \"light\" ? \"selected\" : \"\" ?>><?= __(\"light\") ?></option>
+                            <option value=\"dark\" <?= (\$settings[\"admin_theme\"] ?? \"\") == \"dark\" ? \"selected\" : \"\" ?>><?= __(\"dark\") ?></option>
                         </select>
                     </div>
-                    <div class="mb-3">
-                        <label class="form-label"><?= __("stats_retention") ?></label>
-                        <input type="number" class="form-control" name="stats_retention" value="<?= htmlspecialchars($settings["stats_retention"] ?? 30) ?>" min="1" max="365">
+                    <div class=\"mb-3\">
+                        <label class=\"form-label\"><?= __(\"stats_retention\") ?></label>
+                        <input type=\"number\" class=\"form-control\" name=\"stats_retention\" value=\"<?= htmlspecialchars(\$settings[\"stats_retention\"] ?? 30) ?>\" min=\"1\" max=\"365\">
                     </div>
-                    <div class="mb-3">
-                        <label class="form-label"><?= __("admin_lang") ?></label>
-                        <select class="form-select" name="admin_lang">
-                            <option value="ru" <?= ($settings["admin_lang"] ?? "ru") == "ru" ? "selected" : "" ?>>Русский</option>
-                            <option value="en" <?= ($settings["admin_lang"] ?? "") == "en" ? "selected" : "" ?>>English</option>
+                    <div class=\"mb-3\">
+                        <label class=\"form-label\"><?= __(\"admin_lang\") ?></label>
+                        <select class=\"form-select\" name=\"admin_lang\">
+                            <option value=\"ru\" <?= (\$settings[\"admin_lang\"] ?? \"ru\") == \"ru\" ? \"selected\" : \"\" ?>>Русский</option>
+                            <option value=\"en\" <?= (\$settings[\"admin_lang\"] ?? \"\") == \"en\" ? \"selected\" : \"\" ?>>English</option>
                         </select>
                     </div>
                     <hr>
-                    <h4 class="mt-4">DeepSeek AI Settings</h4>
-                    <div class="mb-3">
-                        <label class="form-label">API Key DeepSeek</label>
-                        <input type="password" class="form-control" name="deepseek_api_key" value="<?= htmlspecialchars($settings["deepseek_api_key"] ?? "") ?>">
-                        <div class="form-text">Получите ключ на platform.deepseek.com</div>
+                    <h4 class=\"mt-4\">DeepSeek AI Settings</h4>
+                    <div class=\"mb-3\">
+                        <label class=\"form-label\">API Key DeepSeek</label>
+                        <input type=\"password\" class=\"form-control\" name=\"deepseek_api_key\" value=\"<?= htmlspecialchars(\$settings[\"deepseek_api_key\"] ?? \"\") ?>\">
+                        <div class=\"form-text\">Получите ключ на platform.deepseek.com</div>
                     </div>
-                    <div class="mb-3">
-                        <label class="form-label">Модель</label>
-                        <select class="form-select" name="deepseek_model">
-                            <option value="deepseek-chat" <?= ($settings["deepseek_model"] ?? "deepseek-chat") == "deepseek-chat" ? "selected" : "" ?>>DeepSeek Chat</option>
-                            <option value="deepseek-coder" <?= ($settings["deepseek_model"] ?? "") == "deepseek-coder" ? "selected" : "" ?>>DeepSeek Coder</option>
+                    <div class=\"mb-3\">
+                        <label class=\"form-label\">Модель</label>
+                        <select class=\"form-select\" name=\"deepseek_model\">
+                            <option value=\"deepseek-chat\" <?= (\$settings[\"deepseek_model\"] ?? \"deepseek-chat\") == \"deepseek-chat\" ? \"selected\" : \"\" ?>>DeepSeek Chat</option>
+                            <option value=\"deepseek-coder\" <?= (\$settings[\"deepseek_model\"] ?? \"\") == \"deepseek-coder\" ? \"selected\" : \"\" ?>>DeepSeek Coder</option>
                         </select>
                     </div>
-                    <div class="mb-3">
-                        <label class="form-label">Max tokens</label>
-                        <input type="number" class="form-control" name="deepseek_max_tokens" value="<?= htmlspecialchars($settings["deepseek_max_tokens"] ?? 2000) ?>" min="100" max="8000">
+                    <div class=\"mb-3\">
+                        <label class=\"form-label\">Max tokens</label>
+                        <input type=\"number\" class=\"form-control\" name=\"deepseek_max_tokens\" value=\"<?= htmlspecialchars(\$settings[\"deepseek_max_tokens\"] ?? 2000) ?>\" min=\"100\" max=\"8000\">
                     </div>
-                    <button type="submit" class="btn btn-primary"><?= __("save") ?></button>
+                    <button type=\"submit\" class=\"btn btn-primary\"><?= __(\"save\") ?></button>
                 </form>
             </main>
         </div>
     </div>
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src=\"https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js\"></script>
 </body>
-</html>
-SETTINGS
+</html>"
 chown www-data:www-data "$ADMIN_DIR/settings.php"
 chmod 644 "$ADMIN_DIR/settings.php"
 log_only "settings.php создан."
