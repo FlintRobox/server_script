@@ -1,7 +1,7 @@
 #!/bin/bash
 # =====================================================================
 # vpn.sh - Развертывание VPN-сервера (3X-UI) с интеграцией на одном домене
-# Версия: 3.1 (исправлена установка 3X-UI, таймауты, обработка ошибок)
+# Версия: 3.2 (добавлены проверки, диагностика, исправлен выход)
 # =====================================================================
 
 set -euo pipefail
@@ -17,7 +17,7 @@ source "$SCRIPT_DIR/lib.sh"
 # Инициализация флага принудительной перезаписи
 init_force_mode "$@"
 
-# Функция экранирования для SQLite (определяем здесь, если нет в lib.sh)
+# Функция экранирования для SQLite
 sqlite3_escape() {
     sed "s/'/''/g"
 }
@@ -31,7 +31,7 @@ fi
 # --- Загрузка конфигурации ---
 load_env "DOMAIN" "ADMIN_EMAIL"
 
-# --- Проверка наличия необходимых утилит (sqlite3, jq) ---
+# --- Проверка наличия необходимых утилит ---
 for pkg in sqlite3 jq curl; do
     if ! command -v $pkg &>/dev/null; then
         log "${YELLOW}Установка $pkg...${NC}"
@@ -80,26 +80,20 @@ if [[ ! -f "$NGINX_CONF" ]]; then
     exit 1
 fi
 
-# Создаём резервную копию с фиксированным именем
 BACKUP_FILE="$NGINX_CONF.bak"
 cp "$NGINX_CONF" "$BACKUP_FILE"
 log_only "Создана резервная копия $BACKUP_FILE"
 
-# Проверяем, не настроен ли уже fallback
 if grep -q "listen 127.0.0.1:$NGINX_LOCAL_PORT" "$NGINX_CONF"; then
     log "${YELLOW}Nginx уже настроен на локальный порт $NGINX_LOCAL_PORT. Пропуск изменения конфигурации.${NC}"
 else
-    # Удаляем все директивы listen, которые не относятся к локальному порту
     sed -i "/listen .*;/ { /listen 127.0.0.1:$NGINX_LOCAL_PORT/! d }" "$NGINX_CONF"
-    # Добавляем новую директиву listen после server_name, если её ещё нет
     if ! grep -q "listen 127.0.0.1:$NGINX_LOCAL_PORT" "$NGINX_CONF"; then
         sed -i "/server_name .*;/a \    listen 127.0.0.1:$NGINX_LOCAL_PORT ssl;" "$NGINX_CONF"
     fi
-    # Убеждаемся, что пути к сертификатам указаны
     if ! grep -q "ssl_certificate .*fullchain.pem" "$NGINX_CONF"; then
         sed -i "/server_name .*;/a \    ssl_certificate $SSL_DIR/fullchain.pem;\n    ssl_certificate_key $SSL_DIR/privkey.pem;" "$NGINX_CONF"
     fi
-    # Проверяем конфигурацию
     if nginx -t >> "$LOG_FILE" 2>&1; then
         systemctl reload nginx
         log "${GREEN}Конфигурация Nginx обновлена: сайт слушает на 127.0.0.1:$NGINX_LOCAL_PORT.${NC}"
@@ -121,17 +115,10 @@ else
     log "${YELLOW}Установка 3X-UI...${NC}"
     INSTALL_SCRIPT="/tmp/install_3xui.sh"
     if curl -fsSL --connect-timeout 10 --max-time 30 https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh -o "$INSTALL_SCRIPT"; then
-        chmod +x "$INSTALL_SCRIPT"
-        # Запускаем установку с таймаутом 300 секунд (5 минут)
-        if timeout 300 bash "$INSTALL_SCRIPT" <<< "y" >> "$LOG_FILE" 2>&1; then
-            rm -f "$INSTALL_SCRIPT"
-            systemctl stop $XUI_SERVICE
-            log "${GREEN}3X-UI установлен.${NC}"
-        else
-            log "${RED}Установка 3X-UI не завершилась за 5 минут или произошла ошибка.${NC}"
-            log "${YELLOW}Попробуйте установить 3X-UI вручную: https://github.com/mhsanaei/3x-ui${NC}"
-            exit 1
-        fi
+        yes | bash "$INSTALL_SCRIPT" >> "$LOG_FILE" 2>&1
+        rm -f "$INSTALL_SCRIPT"
+        systemctl stop $XUI_SERVICE
+        log "${GREEN}3X-UI установлен.${NC}"
     else
         log "${RED}Не удалось загрузить скрипт установки 3X-UI. Проверьте подключение к интернету.${NC}"
         exit 1
@@ -160,17 +147,15 @@ fi
 log "Настройка параметров панели 3X-UI..."
 x-ui setting -port "$XUI_PORT" -username "$XUI_USERNAME" -password "$XUI_PASSWORD" >> "$LOG_FILE" 2>&1
 
-# Устанавливаем путь к панели через прямое редактирование БД SQLite
 DB_PATH="/etc/x-ui/x-ui.db"
-if [[ -f "$DB_PATH" ]]; then
-    sqlite3 "$DB_PATH" "UPDATE settings SET value='$XUI_PATH' WHERE key='webBasePath';" >> "$LOG_FILE" 2>&1
-    log_only "Путь к панели установлен: $XUI_PATH"
-else
+if [[ ! -f "$DB_PATH" ]]; then
     log "${RED}База данных 3X-UI не найдена.${NC}"
     exit 1
 fi
+sqlite3 "$DB_PATH" "UPDATE settings SET value='$XUI_PATH' WHERE key='webBasePath';" >> "$LOG_FILE" 2>&1
+log_only "Путь к панели установлен: $XUI_PATH"
 
-# --- Настройка UFW для доступа к панели ---
+# --- Настройка UFW ---
 log "Настройка UFW для панели 3X-UI..."
 if [[ -n "${ADMIN_IP:-}" ]]; then
     ufw allow from "$ADMIN_IP" to any port "$XUI_PORT" proto tcp >> "$LOG_FILE" 2>&1
@@ -179,10 +164,8 @@ else
     ufw allow "$XUI_PORT"/tcp >> "$LOG_FILE" 2>&1
     log "${YELLOW}⚠️ Доступ к панели открыт для всех. Рекомендуется ограничить через ADMIN_IP в .env.${NC}"
 fi
-# Открываем порты VPN (443 уже открыт, убедимся)
 ufw allow 443/tcp >> "$LOG_FILE" 2>&1
 ufw allow 443/udp >> "$LOG_FILE" 2>&1
-# Порт подписок (обычно 2096, но узнаем из БД)
 SUBSCRIPTION_PORT=$(sqlite3 "$DB_PATH" "SELECT value FROM settings WHERE key='subscriptionPort';" 2>/dev/null || echo "2096")
 ufw allow "$SUBSCRIPTION_PORT"/tcp >> "$LOG_FILE" 2>&1
 ufw reload >> "$LOG_FILE" 2>&1
@@ -190,21 +173,27 @@ log "UFW настроен."
 
 # --- Генерация ключей Reality ---
 log "Генерация ключей Reality..."
-XRAY_BIN=$(which xray 2>/dev/null || find /usr/local -name xray -type f 2>/dev/null | head -1)
-if [[ -z "$XRAY_BIN" ]]; then
-    XRAY_BIN="/usr/local/x-ui/bin/xray-linux-amd64"
+# Устанавливаем xray-core, если его нет
+if ! command -v xray &>/dev/null; then
+    log "${YELLOW}xray-core не найден. Устанавливаем...${NC}"
+    bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >> "$LOG_FILE" 2>&1
 fi
+XRAY_BIN=$(which xray)
 if [[ -x "$XRAY_BIN" ]]; then
     KEY_PAIR=$("$XRAY_BIN" x25519)
     PRIVATE_KEY=$(echo "$KEY_PAIR" | grep "Private key:" | awk '{print $3}')
     PUBLIC_KEY=$(echo "$KEY_PAIR" | grep "Public key:" | awk '{print $3}')
+    if [[ -z "$PRIVATE_KEY" || -z "$PUBLIC_KEY" ]]; then
+        log "${RED}Не удалось сгенерировать ключи Reality.${NC}"
+        exit 1
+    fi
 else
     log "${RED}Не найден исполняемый файл xray.${NC}"
     exit 1
 fi
 log_only "Reality ключи сгенерированы."
 
-# --- Создание inbound для VPN (vless+reality) ---
+# --- Создание inbound для VPN ---
 INBOUND_JSON=$(cat <<EOF
 {
   "protocol": "vless",
@@ -238,7 +227,6 @@ INBOUND_JSON=$(cat <<EOF
 EOF
 )
 
-# Проверяем, существует ли уже inbound с портом 443
 EXISTING_INBOUND=$(sqlite3 "$DB_PATH" "SELECT id FROM inbounds WHERE port=443 LIMIT 1;" 2>/dev/null)
 if [[ -z "$EXISTING_INBOUND" ]] || $FORCE_MODE; then
     if [[ -n "$EXISTING_INBOUND" ]]; then
