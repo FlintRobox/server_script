@@ -17,6 +17,17 @@ source "$SCRIPT_DIR/lib.sh"
 # Инициализация флага принудительной перезаписи
 init_force_mode "$@"
 
+# Функция безопасного добавления переменной в .env (без дублей)
+add_to_env() {
+    local key="$1"
+    local value="$2"
+    if grep -q "^${key}=" "$SCRIPT_DIR/.env"; then
+        sed -i "s|^${key}=.*|${key}=\"${value}\"|" "$SCRIPT_DIR/.env"
+    else
+        echo "${key}=\"${value}\"" >> "$SCRIPT_DIR/.env"
+    fi
+}
+
 # --- Константы ---
 WEB_ROOT_BASE="/var/www"
 PHP_VERSION="8.3"
@@ -45,12 +56,12 @@ fi
 
 if [[ -z "${DOMAIN:-}" ]]; then
     ask_var DOMAIN "Введите доменное имя сайта" "example.com" validate_domain
-    echo "DOMAIN=\"$DOMAIN\"" >> "$SCRIPT_DIR/.env"
+    add_to_env "DOMAIN" "$DOMAIN"
 fi
 
 if [[ -z "${ADMIN_EMAIL:-}" ]]; then
     ask_var ADMIN_EMAIL "Введите email администратора (для уведомлений и сертификатов)" "admin@$DOMAIN" validate_email
-    echo "ADMIN_EMAIL=\"$ADMIN_EMAIL\"" >> "$SCRIPT_DIR/.env"
+    add_to_env "ADMIN_EMAIL" "$ADMIN_EMAIL"
 fi
 
 set -a
@@ -140,11 +151,11 @@ if [[ "$NEED_SSL" == "y" ]]; then
     fi
 fi
 
-echo "NEED_SSL=\"$NEED_SSL\"" >> "$SCRIPT_DIR/.env"
+add_to_env "NEED_SSL" "$NEED_SSL"
 if [[ "$NEED_SSL" == "y" ]]; then
-    echo "SSL_TYPE=\"$SSL_TYPE\"" >> "$SCRIPT_DIR/.env"
+    add_to_env "SSL_TYPE" "$SSL_TYPE"
     if [[ "$SSL_TYPE" == "existing" ]]; then
-        echo "SSL_CERT_DIR=\"$SSL_CERT_DIR\"" >> "$SCRIPT_DIR/.env"
+        add_to_env "SSL_CERT_DIR" "$SSL_CERT_DIR"
         SSL_TARGET="/etc/letsencrypt/live/$DOMAIN"
         mkdir -p "$SSL_TARGET"
         if [[ -n "$SSL_CA" ]]; then
@@ -157,8 +168,8 @@ if [[ "$NEED_SSL" == "y" ]]; then
         chmod 600 "$SSL_TARGET/privkey.pem"
         SSL_CERT_PATH="$SSL_TARGET/fullchain.pem"
         SSL_KEY_PATH="$SSL_TARGET/privkey.pem"
-        echo "SSL_CERT_PATH=\"$SSL_CERT_PATH\"" >> "$SCRIPT_DIR/.env"
-        echo "SSL_KEY_PATH=\"$SSL_KEY_PATH\"" >> "$SCRIPT_DIR/.env"
+        add_to_env "SSL_CERT_PATH" "$SSL_CERT_PATH"
+        add_to_env "SSL_KEY_PATH" "$SSL_KEY_PATH"
         echo -e "${GREEN}Сертификаты сконвертированы и сохранены в $SSL_TARGET${NC}"
     fi
 fi
@@ -166,23 +177,23 @@ fi
 # --- Генерация параметров базы данных ---
 if [[ -z "${DB_NAME:-}" ]]; then
     DB_NAME="$(echo "$DOMAIN" | tr '.' '_')"
-    echo "DB_NAME=\"$DB_NAME\"" >> "$SCRIPT_DIR/.env"
+    add_to_env "DB_NAME" "$DB_NAME"
 fi
 if [[ -z "${DB_USER:-}" ]]; then
     DB_USER="user_${DB_NAME}"
-    echo "DB_USER=\"$DB_USER\"" >> "$SCRIPT_DIR/.env"
+    add_to_env "DB_USER" "$DB_USER"
 fi
 if [[ -z "${DB_PASSWORD:-}" ]]; then
     DB_PASSWORD="$(openssl rand -base64 20 | tr -dc 'A-Za-z0-9' | head -c20)"
-    echo "DB_PASSWORD=\"$DB_PASSWORD\"" >> "$SCRIPT_DIR/.env"
+    add_to_env "DB_PASSWORD" "$DB_PASSWORD"
 fi
 if [[ -z "${ADMIN_PASSWORD:-}" ]]; then
     ADMIN_PASSWORD="$(openssl rand -base64 16 | tr -dc 'A-Za-z0-9' | head -c16)"
-    echo "ADMIN_PASSWORD=\"$ADMIN_PASSWORD\"" >> "$SCRIPT_DIR/.env"
+    add_to_env "ADMIN_PASSWORD" "$ADMIN_PASSWORD"
 fi
 if [[ -z "${SITE_NAME:-}" ]]; then
     SITE_NAME="Мой сайт"
-    echo "SITE_NAME=\"$SITE_NAME\"" >> "$SCRIPT_DIR/.env"
+    add_to_env "SITE_NAME" "$SITE_NAME"
 fi
 
 # --- Пути ---
