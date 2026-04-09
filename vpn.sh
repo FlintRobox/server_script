@@ -166,9 +166,8 @@ if [[ -z "${XUI_PASSWORD:-}" ]]; then
     add_to_env "XUI_PASSWORD" "$XUI_PASSWORD"
 fi
 
-# --- Настройка панели через утилиту x-ui ---
+# --- Настройка панели через прямое редактирование БД ---
 log "Настройка параметров панели 3X-UI..."
-x-ui setting -port "$XUI_PORT" -username "$XUI_USERNAME" -password "$XUI_PASSWORD" >> "$LOG_FILE" 2>&1
 
 DB_PATH="/etc/x-ui/x-ui.db"
 if [[ ! -f "$DB_PATH" ]]; then
@@ -176,20 +175,46 @@ if [[ ! -f "$DB_PATH" ]]; then
     exit 1
 fi
 
-# Устанавливаем путь к панели
-sqlite3 "$DB_PATH" "UPDATE settings SET value='$XUI_PATH' WHERE key='webBasePath';" >> "$LOG_FILE" 2>&1
+# Останавливаем панель
+systemctl stop $XUI_SERVICE
+sleep 1
 
-# Включаем HTTPS для панели (используем сертификаты Let's Encrypt)
-log "Включение HTTPS для панели 3X-UI..."
+# Обновляем параметры в БД
 sqlite3 "$DB_PATH" <<EOF
+UPDATE settings SET value='$XUI_PORT' WHERE key='webPort';
+UPDATE settings SET value='$XUI_PATH' WHERE key='webBasePath';
 UPDATE settings SET value='$SSL_DIR/fullchain.pem' WHERE key='webCertFile';
 UPDATE settings SET value='$SSL_DIR/privkey.pem' WHERE key='webKeyFile';
 UPDATE settings SET value='true' WHERE key='webEnable';
 EOF
+log_only "Параметры панели обновлены в БД."
 
-# Перезапускаем панель, чтобы применить все изменения
-systemctl restart $XUI_SERVICE
-sleep 2
+# Запускаем панель
+systemctl start $XUI_SERVICE
+sleep 3
+
+# Проверяем, какой порт реально слушается
+ACTUAL_PORT=$(ss -tlnp | grep x-ui | grep -oP ':\K\d+' | head -1)
+if [[ -z "$ACTUAL_PORT" ]]; then
+    log "${RED}Панель не запустилась. Проверьте логи: journalctl -u x-ui -n 20${NC}"
+    exit 1
+fi
+
+if [[ "$ACTUAL_PORT" != "$XUI_PORT" ]]; then
+    log "${YELLOW}Панель запустилась на порту $ACTUAL_PORT, а не на $XUI_PORT. Исправляем.${NC}"
+    sqlite3 "$DB_PATH" "UPDATE settings SET value='$ACTUAL_PORT' WHERE key='webPort';"
+    add_to_env "XUI_PORT" "$ACTUAL_PORT"
+    XUI_PORT=$ACTUAL_PORT
+else
+    log "${GREEN}Панель успешно запущена на порту $XUI_PORT.${NC}"
+fi
+
+# Проверяем, включён ли HTTPS (по логам должно быть "Web server running HTTPS")
+if journalctl -u $XUI_SERVICE -n 5 --no-pager | grep -q "Web server running HTTPS"; then
+    log "${GREEN}HTTPS для панели включён.${NC}"
+else
+    log "${YELLOW}Внимание: панель работает по HTTP. HTTPS не включён (возможно, ошибка сертификатов).${NC}"
+fi
 
 # Проверяем, что панель запустилась на нужном порту
 if ! ss -tlnp | grep -q ":$XUI_PORT"; then
