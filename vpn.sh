@@ -149,6 +149,20 @@ else
 fi
 
 # --- Генерация параметров панели (если не заданы в .env) ---
+
+# Принудительная перегенерация параметров панели при --force
+if $FORCE_MODE; then
+    log "${YELLOW}Режим --force: генерируем новые параметры панели.${NC}"
+    XUI_PORT=$(( RANDOM % 1000 + 52000 ))
+    XUI_PATH="/$(openssl rand -hex 8)"
+    XUI_USERNAME="admin_$(openssl rand -hex 4)"
+    XUI_PASSWORD=$(openssl rand -base64 16 | tr -dc 'A-Za-z0-9!?@#' | head -c20)
+    add_to_env "XUI_PORT" "$XUI_PORT"
+    add_to_env "XUI_PATH" "$XUI_PATH"
+    add_to_env "XUI_USERNAME" "$XUI_USERNAME"
+    add_to_env "XUI_PASSWORD" "$XUI_PASSWORD"
+fi
+
 if [[ -z "${XUI_PORT:-}" ]]; then
     XUI_PORT=$(( RANDOM % 1000 + 52000 ))
     add_to_env "XUI_PORT" "$XUI_PORT"
