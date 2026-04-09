@@ -180,7 +180,7 @@ if [[ -z "${XUI_PASSWORD:-}" ]]; then
     add_to_env "XUI_PASSWORD" "$XUI_PASSWORD"
 fi
 
-# --- Настройка панели через прямое редактирование БД (надёжный способ) ---
+# --- Настройка панели через прямое редактирование БД и команду setting ---
 log "Настройка параметров панели 3X-UI..."
 
 DB_PATH="/etc/x-ui/x-ui.db"
@@ -189,29 +189,17 @@ if [[ ! -f "$DB_PATH" ]]; then
     exit 1
 fi
 
-# Останавливаем панель и убиваем процессы (с проверкой)
-log "Останавливаем панель..."
-systemctl stop $XUI_SERVICE 2>/dev/null || true
+# Останавливаем панель
+systemctl stop $XUI_SERVICE
 pkill -f "x-ui" 2>/dev/null || true
 sleep 2
 
-# Принудительно завершаем, если остались процессы
-if pgrep -f "x-ui" > /dev/null; then
-    log "${YELLOW}Процесс x-ui всё ещё работает. Принудительно завершаем...${NC}"
-    pkill -9 -f "x-ui" 2>/dev/null || true
-    sleep 1
-fi
-
-# Обновляем параметры в БД (порт, путь, логин, пароль, HTTPS)
-log "Обновляем параметры в БД..."
-sqlite3 "$DB_PATH" <<EOF || { log "${RED}Ошибка при обновлении БД.${NC}"; exit 1; }
+# Обновляем параметры в БД (порт, путь)
+sqlite3 "$DB_PATH" <<EOF
 UPDATE settings SET value='$XUI_PORT' WHERE key='webPort';
 UPDATE settings SET value='$XUI_PATH' WHERE key='webBasePath';
-UPDATE settings SET value='$XUI_USERNAME' WHERE key='webUsername';
-UPDATE settings SET value='$XUI_PASSWORD' WHERE key='webPassword';
 UPDATE settings SET value='true' WHERE key='webEnable';
 EOF
-log_only "Параметры панели обновлены в БД."
 
 # Копируем сертификаты для HTTPS
 CERT_DIR="/etc/x-ui/certs"
@@ -225,25 +213,23 @@ if [[ -f "$SSL_DIR/fullchain.pem" && -f "$SSL_DIR/privkey.pem" ]]; then
 UPDATE settings SET value='$CERT_DIR/fullchain.pem' WHERE key='webCertFile';
 UPDATE settings SET value='$CERT_DIR/privkey.pem' WHERE key='webKeyFile';
 EOF
-    log_only "Сертификаты скопированы и настроены."
-else
-    log "${YELLOW}Сертификаты не найдены. HTTPS для панели не будет включён.${NC}"
 fi
 
+# Применяем настройки через команду setting (логин, пароль, порт, путь)
+/usr/local/x-ui/x-ui setting -port "$XUI_PORT" -username "$XUI_USERNAME" -password "$XUI_PASSWORD" -webBasePath "$XUI_PATH" >> "$LOG_FILE" 2>&1
+
 # Запускаем панель
-log "Запускаем панель..."
 systemctl start $XUI_SERVICE
 sleep 3
 
 # Проверяем реальный порт
 ACTUAL_PORT=$(ss -tlnp | grep x-ui | grep -oP ':\K\d+' | head -1)
 if [[ -z "$ACTUAL_PORT" ]]; then
-    log "${RED}Панель не запустилась. Проверьте логи: journalctl -u x-ui -n 20${NC}"
+    log "${RED}Панель не запустилась. Проверьте логи.${NC}"
     exit 1
 fi
-
 if [[ "$ACTUAL_PORT" != "$XUI_PORT" ]]; then
-    log "${YELLOW}Панель запустилась на порту $ACTUAL_PORT, а не на $XUI_PORT. Обновляем .env.${NC}"
+    log "${YELLOW}Панель запустилась на порту $ACTUAL_PORT. Обновляем .env.${NC}"
     add_to_env "XUI_PORT" "$ACTUAL_PORT"
     XUI_PORT=$ACTUAL_PORT
 fi
