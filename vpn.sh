@@ -373,11 +373,22 @@ if systemctl list-units --full --all | grep -q "x-ui.service"; then
     log "${GREEN}3X-UI уже установлен.${NC}"
 else
     log "${YELLOW}Установка 3X-UI...${NC}"
-    if ! bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh) --panel >> "$LOG_FILE" 2>&1; then
-        log "${RED}Ошибка установки 3X-UI.${NC}"
+    INSTALL_SCRIPT="/tmp/install_3xui.sh"
+    if curl -fsSL --connect-timeout 10 --max-time 30 https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh -o "$INSTALL_SCRIPT"; then
+        chmod +x "$INSTALL_SCRIPT"
+        # Запускаем с автоматическим подтверждением (yes) и таймаутом
+        if timeout 300 yes | bash "$INSTALL_SCRIPT" >> "$LOG_FILE" 2>&1; then
+            log "${GREEN}3X-UI установлен.${NC}"
+        else
+            log "${RED}Ошибка установки 3X-UI (код $?). Проверьте лог $LOG_FILE.${NC}"
+            rm -f "$INSTALL_SCRIPT"
+            exit 1
+        fi
+        rm -f "$INSTALL_SCRIPT"
+    else
+        log "${RED}Не удалось загрузить скрипт установки 3X-UI.${NC}"
         exit 1
     fi
-    log "${GREEN}3X-UI установлен.${NC}"
 fi
 
 # ----------------------------------------------------------------------
