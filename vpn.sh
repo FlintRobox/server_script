@@ -376,15 +376,16 @@ else
     INSTALL_SCRIPT="/tmp/install_3xui.sh"
     if curl -fsSL --connect-timeout 10 --max-time 30 https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh -o "$INSTALL_SCRIPT"; then
         chmod +x "$INSTALL_SCRIPT"
-        # Запускаем с автоматическим подтверждением (yes) и таймаутом
-        if timeout 300 yes | bash "$INSTALL_SCRIPT" >> "$LOG_FILE" 2>&1; then
+        # Передаём два 'y' для автоматического подтверждения (установка и настройка)
+        printf 'y\ny\n' | bash "$INSTALL_SCRIPT" >> "$LOG_FILE" 2>&1
+        install_result=$?
+        rm -f "$INSTALL_SCRIPT"
+        if [[ $install_result -eq 0 ]]; then
             log "${GREEN}3X-UI установлен.${NC}"
         else
-            log "${RED}Ошибка установки 3X-UI (код $?). Проверьте лог $LOG_FILE.${NC}"
-            rm -f "$INSTALL_SCRIPT"
+            log "${RED}Ошибка установки 3X-UI (код $install_result). Проверьте лог $LOG_FILE.${NC}"
             exit 1
         fi
-        rm -f "$INSTALL_SCRIPT"
     else
         log "${RED}Не удалось загрузить скрипт установки 3X-UI.${NC}"
         exit 1
