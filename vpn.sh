@@ -476,6 +476,9 @@ sqlite3 "$XUI_DB" "CREATE TABLE IF NOT EXISTS inbounds (
 if [[ -n "$EXISTING_INBOUND" ]] && [[ "$FORCE_MODE" == false ]]; then
     log "${YELLOW}Inbound на порту 443 уже существует (ID: $INBOUND_ID). Пропуск.${NC}"
     CLIENT_UUID=$(echo "$EXISTING_INBOUND" | cut -d'|' -f2 | jq -r '.clients[0].id' 2>/dev/null || echo "")
+    # Важно: перезапустим x-ui, чтобы убедиться, что inbound активен
+    systemctl restart x-ui
+    sleep 3
 else
     if [[ -n "$EXISTING_INBOUND" ]]; then
         log "${YELLOW}Удаление существующего inbound на порту 443...${NC}"
@@ -513,6 +516,8 @@ VALUES (1, 0, 0, 0, 'VLESS+TLS', 1, 0, '', 443, 'vless', '$SETTINGS_JSON', '$STR
 EOF
     log "${GREEN}Inbound создан, UUID клиента: $CLIENT_UUID${NC}"
     add_to_env "CLIENT_UUID" "$CLIENT_UUID"
+    systemctl restart x-ui
+    sleep 5
 fi
 
 # ----------------------------------------------------------------------
@@ -520,13 +525,26 @@ fi
 # ----------------------------------------------------------------------
 next_step "Перезапуск Xray и проверка"
 
-systemctl restart x-ui
+# Убедимся, что служба запущена
+if ! systemctl is-active --quiet x-ui; then
+    log "${YELLOW}Служба x-ui не активна, пытаемся запустить...${NC}"
+    systemctl start x-ui
+    sleep 5
+fi
+
+# Дадим Xray время на инициализацию
 sleep 5
 
 if ! ss -tlnp | grep -q ':443.*xray\|:443.*x-ui'; then
     log "${RED}Ошибка: порт 443 не прослушивается Xray.${NC}"
-    log "Проверьте логи: journalctl -u x-ui -n 30"
-    exit 1
+    log "Попробуем перезапустить x-ui вручную..."
+    systemctl restart x-ui
+    sleep 10
+    if ! ss -tlnp | grep -q ':443.*xray\|:443.*x-ui'; then
+        log "${RED}Повторная ошибка. Проверьте конфигурацию вручную.${NC}"
+        log "Логи x-ui: $(journalctl -u x-ui --no-pager -n 20)"
+        exit 1
+    fi
 fi
 log "${GREEN}Xray запущен и слушает порт 443.${NC}"
 
